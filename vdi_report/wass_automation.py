@@ -369,15 +369,28 @@ class WassReportAutomator:
         self._click("import_button")
         self._short_pause(2)
 
-        # Step 2: wait for the textarea and paste.
+        # Step 2: wait for the textarea and paste the name list.
+        # IMPORTANT: do NOT use textarea.send_keys() for thousands of lines --
+        # Selenium sends one WebDriver command per character, which takes
+        # minutes and often hangs the Edge driver mid-way. Instead set the
+        # value via JavaScript (one round-trip) and dispatch 'input'/'change'
+        # events so Matrix42's EmControls framework picks up the new value.
+        # The text is passed as arguments[1] so WebDriver handles all escaping.
         by, val = self._loc("import_textarea")
         textarea = self._wait().until(
             EC.presence_of_element_located((by, val)),
             message="import textarea (#ListResult) not found",
         )
-        textarea.clear()
-        textarea.send_keys("\n".join(names))
-        logger.info("pasted %d computer names into #ListResult", len(names))
+        text = "\n".join(names)
+        self._d.execute_script(
+            "var el = arguments[0], txt = arguments[1];"
+            "el.value = txt;"
+            "el.dispatchEvent(new Event('input', {bubbles:true}));"
+            "el.dispatchEvent(new Event('change', {bubbles:true}));",
+            textarea,
+            text,
+        )
+        logger.info("pasted %d computer names into #ListResult (via JS)", len(names))
 
         # Step 3: click the "Import computer list" link to submit.
         self._click("import_computer_list_link")
