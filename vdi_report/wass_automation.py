@@ -92,33 +92,36 @@ DEFAULT_LOCATORS: Dict[str, Any] = {
     "new_report": (By.XPATH, _ci("new report")),
     # Report name input -- Matrix42 uses <input id="Name">.
     "report_name_input": (By.CSS_SELECTOR, "#Name, input#Name"),
-    # Import step. The "Import" icon buttons are Matrix42 IconButton widgets
-    # with stable ids and no visible text (just an <img> + tooltip). The user
-    # described "the first button on the right" -> that is #ImportList, which
-    # loads Host_Import.aspx into #Level3_Content.
+    # Import step. #ImportList is the IconButton that opens the import picker.
     "import_button": (By.CSS_SELECTOR, "#ImportList"),
-    # The "Import computer list" link is a real <a class="EmTextLink"> with
-    # that text, plus an onclick that posts to Host_Import.aspx?mode=AddList.
     "import_computer_list_link": (
         By.CSS_SELECTOR,
         "a.EmTextLink[href*='Host_Import']",
     ),
-    # The textarea where the computer name list is pasted.
     "import_textarea": (By.CSS_SELECTOR, "#ListResult, textarea#ListResult"),
-    # Wizard navigation -- these are Matrix42 Button widgets (<div id="Button...">
-    # with text inside). _ci() matches the text case-insensitively.
+    # Result elements step. #Output is the IconButton (tooltip "Select output
+    # elements") that opens the output-element picker popup (Level3).
+    "result_elements_button": (By.CSS_SELECTOR, "#Output"),
+    # NOTE: wizard Next/OK buttons are NOT matched by static locators -- wass
+    # has multiple buttons with the same text ("Next", "OK") across wizard
+    # steps. They are clicked via _click_button_by_onclick(), which finds all
+    # Matrix42 Button widgets with the given label and filters by the onclick
+    # handler registered in the sibling <script>. Mapping (used by the
+    # high-level steps):
+    #   - Step1 Next  -> label="Next",  onclick~"Inv_Rep_Step2.aspx"
+    #   - Step2 Next  -> label="Next",  onclick~"Inv_Rep_Step3.aspx"
+    #   - Picker OK   -> label="OK",    onclick~"ClosePopup('Level3')"
+    #   - Generate OK -> label="OK",    onclick~"Save_Report.aspx"
+    # Generic fallbacks kept for any other step:
     "ok_button": (By.XPATH, _ci("ok")),
     "next_button": (By.XPATH, _ci("next")),
-    "result_elements_button": (By.XPATH, _ci("result element")),
-    "login_group": (By.XPATH, _ci("login")),
-    # Status / refresh
+    # Status / refresh. The refresh icon is a small <img alt="Update"
+    # src="img/Table_Refresh.png"> in the top-right of the report list.
     "refresh_button": (
-        By.XPATH,
-        "//button[contains(@title,'refresh') or contains(@aria-label,'refresh')]"
-        " | //*[contains(@class,'refresh')]"
-        " | //*[contains(@title,'Refresh') or contains(@aria-label,'Refresh')]",
+        By.CSS_SELECTOR,
+        "img[alt='Update'], img[src*='Table_Refresh.png']",
     ),
-    # Result dialog
+    # Result dialog (right-click Result -> Excel Download).
     "result_menu_item": (By.XPATH, _ci("result")),
     "excel_download_button": (By.XPATH, _ci("excel download")),
     "download_link": (
@@ -309,6 +312,71 @@ class WassReportAutomator:
         except Exception:
             pass
 
+    def _click_button_by_onclick(
+        self, name: str, label: str, onclick_contains: str, timeout: float = 20
+    ) -> None:
+        """Click a Matrix42 Button widget (``<div id="Button...">``) matched by
+        both its visible label and a substring of its onclick handler.
+
+        wass reuses the labels "Next" and "OK" across multiple wizard steps.
+        The buttons share text but have different onclick handlers, so the
+        only reliable way to pick the right one is to find all Button widgets
+        with the given label and filter by the onclick content. The onclick
+        is registered via ``EmControls.Events.SetOnClick`` in a ``<script>``
+        tag immediately following the button ``<div>``.
+
+        Parameters
+        ----------
+        name:
+            Logical name used in log messages (e.g. "next_step1_button").
+        label:
+            Visible button text, e.g. "Next", "OK".
+        onclick_contains:
+            Substring that must appear in the button's registration script,
+            e.g. "Inv_Rep_Step3.aspx" or "Save_Report.aspx".
+        """
+        deadline = time.time() + timeout
+        last_err = None
+        while time.time() < deadline:
+            # All Matrix42 Button widgets: <div id="Button..."> containing a
+            # <span class="ui-button-text"> with the label.
+            xpath = (
+                f"//div[starts-with(@id,'Button')]"
+                f"[.//span[@class='ui-button-text' and normalize-space()='{label}']]"
+            )
+            candidates = self._d.find_elements(By.XPATH, xpath)
+            for btn in candidates:
+                try:
+                    btn_id = btn.get_attribute("id") or ""
+                    if not btn_id:
+                        continue
+                    # The onclick handler is in a sibling <script> that calls
+                    # EmControls.Events.SetOnClick("btn_id", {...}).
+                    script = self._d.execute_script(
+                        "var b = document.getElementById(arguments[0]);"
+                        "if (!b) return '';"
+                        "var s = b.nextElementSibling;"
+                        "return s ? s.textContent || '' : '';",
+                        btn_id,
+                    ) or ""
+                    if onclick_contains in script and btn.is_displayed():
+                        self._scroll_into_view(btn)
+                        try:
+                            btn.click()
+                        except Exception:
+                            self._d.execute_script("arguments[0].click();", btn)
+                        logger.info("clicked: %s (label='%s', onclick~'%s')",
+                                    name, label, onclick_contains)
+                        return
+                except Exception as e:
+                    last_err = e
+                    continue
+            time.sleep(0.5)
+        raise TimeoutException(
+            f"button '{name}' (label='{label}', onclick~'{onclick_contains}') "
+            f"not found; last error: {last_err}"
+        )
+
     # ------------------------------------------------------------------ #
     # High-level wizard steps
     # ------------------------------------------------------------------ #
@@ -407,37 +475,97 @@ class WassReportAutomator:
         # report-name page and we proceed directly to clicking Next.
 
     def select_result_elements(self, elements: List[str]) -> None:
+        """Open the output-element picker, expand Login, tick the requested
+        checkboxes, and close the picker with its OK button.
+
+        From the inspected HTML:
+          - #Output is the IconButton that opens the picker (Level3 popup).
+          - The Login group is a row whose text is 'Login' with a Plus.png
+            expand icon; clicking that row expands it to show the checkboxes.
+          - Each option is a <tr> whose text label is in a <div class='EmTextClick'>
+            and whose checkbox container is a <div class='EmCheckbox'> with an
+            <input id='Choice_NNN'> inside. Clicking the EmCheckbox div (or the
+            label) toggles it via EmCheckboxClicked().
+          - The OK button that closes this picker has onclick containing
+            "ClosePopup('Level3')".
+        """
+        # Open the picker.
         self._click("result_elements_button")
-        self._short_pause()
-        # Expand the "login" group (click its row to toggle).
-        self._click("login_group")
-        self._short_pause()
-        for label in elements:
-            # Tick the checkbox whose row text contains the label.
-            xpath = (
-                f"//tr[contains(.,'{label}')]"
-                f"//input[@type='checkbox']"
-                f" | //*[normalize-space(text())='{label}']"
-                f"/preceding::input[@type='checkbox'][1]"
-                f" | //*[normalize-space(text())='{label}']"
-                f"/ancestor::tr[1]//input[@type='checkbox']"
+        self._short_pause(2)
+
+        # Expand the Login group by clicking the expand icon in the Login row.
+        # The row contains <img src='sym/Plus.png' alt='Open'>; clicking it (or
+        # the Login text cell) toggles the subgroup open.
+        try:
+            login_row = self._wait(8).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//tr[td/div[normalize-space()='Login']]")
+                ),
+                message="login group row not found",
             )
+            # Prefer the Plus.png icon; fall back to the Login text cell.
             try:
-                cb = self._wait(10).until(
-                    EC.presence_of_element_located((By.XPATH, xpath)),
-                    message=f"checkbox '{label}' not found",
+                plus = login_row.find_element(
+                    By.XPATH, ".//img[contains(@src,'Plus.png') or @alt='Open']"
                 )
-                if not cb.is_selected():
-                    cb.click()
-                    logger.info("ticked: %s", label)
+                self._d.execute_script("arguments[0].click();", plus)
             except Exception:
-                logger.warning("could not tick '%s' -- adjust locators if needed", label)
-        self._click("ok_button")
+                self._d.execute_script("arguments[0].click();", login_row)
+            logger.info("clicked: login group expand")
+        except Exception as e:
+            logger.warning("could not expand Login group: %s", e)
+        self._short_pause(2)
+
+        # Tick each requested checkbox by matching the label text inside the
+        # row's <div class='EmText EmTextClick'>. We click the EmCheckbox div
+        # (the real toggle target) rather than the raw <input>, because
+        # Matrix42 wires the onclick on the div, not the input.
+        for label in elements:
+            try:
+                # Find the label div whose text matches (case-insensitive).
+                label_div = self._wait(10).until(
+                    EC.presence_of_element_located(
+                        (By.XPATH,
+                         f"//div[contains(@class,'EmTextClick')]"
+                         f"[normalize-space(translate(text(),"
+                         f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))"
+                         f"=translate('{label}','ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')]")
+                    ),
+                    message=f"label '{label}' not found",
+                )
+                # The EmCheckbox div is in the same <tr>, last <td>.
+                row = label_div.find_element(By.XPATH, "./ancestor::tr[1]")
+                cb_div = row.find_element(By.XPATH, ".//div[contains(@class,'EmCheckbox')]")
+                # Check current state via the input.
+                cb_input = cb_div.find_element(By.XPATH, ".//input[@type='checkbox']")
+                if not cb_input.is_selected():
+                    self._d.execute_script("arguments[0].click();", cb_div)
+                    logger.info("ticked: %s", label)
+                else:
+                    logger.info("already ticked: %s", label)
+            except Exception as e:
+                logger.warning("could not tick '%s': %s", label, e)
+
+        # Close the picker with the OK button whose onclick closes Level3.
+        self._click_button_by_onclick(
+            "result_elements_ok_button", "OK", "ClosePopup('Level3')"
+        )
 
     def finish_wizard(self) -> None:
-        self._click("next_button")
-        self._short_pause()
-        self._click("ok_button")
+        """Click Step2 Next (-> Step3), then the generate-report OK.
+
+        These two buttons have the same text as other Next/OK buttons in the
+        wizard, so they are disambiguated by their onclick handlers:
+          - Step2 Next: onclick contains 'Inv_Rep_Step3.aspx'
+          - Generate-report OK: onclick contains 'Save_Report.aspx'
+        """
+        self._click_button_by_onclick(
+            "next_step2_button", "Next", "Inv_Rep_Step3.aspx"
+        )
+        self._short_pause(2)
+        self._click_button_by_onclick(
+            "generate_report_ok_button", "OK", "Save_Report.aspx"
+        )
 
     def wait_for_completion(
         self,
@@ -581,11 +709,11 @@ class WassReportAutomator:
         self.open_inventory()
         self.start_new_report(report_name)
         self.import_computer_list(computer_names)
-        # After OK on the import dialog, the wizard moves to the next page
-        # where the "Result elements" button lives. wass requires an explicit
-        # Next click here (the user confirmed there is a Next button between
-        # OK and Result elements).
-        self._click("next_button")
+        # After import submits, click Step1 Next (onclick -> Inv_Rep_Step2.aspx)
+        # to advance to the Result-elements page.
+        self._click_button_by_onclick(
+            "next_step1_button", "Next", "Inv_Rep_Step2.aspx"
+        )
         self._short_pause(2)
         self.select_result_elements(result_elements)
         self.finish_wizard()
