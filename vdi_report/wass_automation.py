@@ -577,6 +577,12 @@ class WassReportAutomator:
         self.open_inventory()
         self.start_new_report(report_name)
         self.import_computer_list(computer_names)
+        # After OK on the import dialog, the wizard moves to the next page
+        # where the "Result elements" button lives. wass requires an explicit
+        # Next click here (the user confirmed there is a Next button between
+        # OK and Result elements).
+        self._click("next_button")
+        self._short_pause(2)
         self.select_result_elements(result_elements)
         self.finish_wizard()
         self.wait_for_completion(report_name)
