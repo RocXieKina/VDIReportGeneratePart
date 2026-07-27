@@ -484,15 +484,14 @@ class WassReportAutomator:
         self._click("import_computer_list_link")
 
         # Step 3b: submitting a large batch pops up a confirmation dialog
-        # (e.g. "are you sure you want to import N computers?"). Just click
-        # through it -- "blindly confirm". Try the OK/Yes/Confirm buttons in
-        # the message box; if none appears within a short window, assume no
-        # confirmation was needed and continue.
-        self._dismiss_import_confirmation()
+        # with an "OK" button. Click it to confirm. If no dialog appears
+        # within the window, assume no confirmation was needed and continue.
+        self._dismiss_import_confirmation(timeout=20)
 
         # Step 4: wait for the right pane to reflect the imported computers.
-        # No stable selector for the result list, so give the UI a moment.
-        time.sleep(3)
+        # The server-side import of a large batch takes ~10-15s to process,
+        # so give it room before reading the result list.
+        time.sleep(15)
         logger.info("imported computer list submitted")
 
         # NOTE: do NOT click OK here. The import dialog has its own OK button
