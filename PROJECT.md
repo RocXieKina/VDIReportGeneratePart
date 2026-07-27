@@ -168,7 +168,22 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 4. `download_result` 替换原来一次性 `context_click + JS fallback` 为调用新方法
 5. import 加 `StaleElementReferenceException`
 
-### 6.6 其他坑
+### 6.6 ⚠️ 已修复的关键 bug：同名报告状态读错（误判完成）
+
+**症状**：`wait_for_completion` 1 秒内就报 "Report successfully created" 然后立刻去下载——但新报告可能还在跑。用户确认 wass 列表里有多条同名报告（重跑产生）。
+
+**根因**：旧 `_read_status` 用 `//*[contains(.,'报告名')]//*[contains(.,'Report successfully created')]` 子串匹配。列表里有旧的同名报告（早已完成），XPath 匹配到旧报告的容器，读到旧报告的 "successfully created" 状态，1 秒就返回。实际新报告还在生成中——状态和时间不匹配。
+
+**修复**（已合入）：重写 `_read_status` + 新增 `_read_row_status`：
+- 找最新 ID 的同名报告行（ID 单调递增 = 新报告）
+- 读**那一行**的 icon `<div class="EmIcon">` 的 `background-image` URL：
+  - 含 `Report_Success` / `success` → `STATUS_DONE`
+  - 含 `running` / `process` / `wait` → `STATUS_RUNNING`
+  - **未知 icon → `STATUS_RUNNING`**（安全默认，避免把半成品误判为完成）
+- fallback：行内文本 / 行 title/alt 属性里的状态文本
+- 只有新报告自己的 icon 翻成 Success 才返回 DONE，绝不继承旧报告的状态
+
+### 6.7 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
@@ -201,6 +216,8 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 | 勾选的元素名不对 | `config.WASS_RESULT_ELEMENTS`，注意 `Last User (Account)` 空格 |
 | 下载的 xlsx 找不到 | `download_dir` 权限 / `.crdownload` 未结束 / `download_link` locator |
 | 报告一直 running 不结束 | `WASS_REPORT_TIMEOUT_SECONDS` / wass 后端慢，正常 |
+| 报告 1 秒就 "successfully created" 但实际没跑完 | 同名报告状态读错 → `_read_status` 已改按最新 ID 行的 icon 判断（6.6 节） |
+| 右键行抛 StaleElementReferenceException | 表格 DOM 重建导致 row 引用失效 → `_open_context_menu_for_report` retry（6.5 节） |
 
 ## 9. 开发约定
 

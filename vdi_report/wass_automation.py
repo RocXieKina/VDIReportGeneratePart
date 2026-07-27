@@ -1084,25 +1084,112 @@ class WassReportAutomator:
                 pass
 
     def _read_status(self, report_name: str) -> str:
-        """Best-effort read of the status text next to *report_name*."""
+        """Read the status of the *newest* report named *report_name*.
+
+        The report list accumulates every report the user ever created, so a
+        name-substring match (the old approach) reads the status of an older
+        same-named report that is already 'successfully created' -- making
+        wait_for_completion return instantly while the report we just
+        launched is still running. We instead locate the newest matching row
+        by report ID (monotonic) and read *that* row's status.
+
+        Status signal, in priority order:
+          1. The row's icon ``<div class="EmIcon">`` ``background-image`` URL:
+             ``Report_Success.png`` -> :data:`STATUS_DONE`; anything else
+             (Running/Processing/etc.) -> :data:`STATUS_RUNNING`. This is the
+             safest signal -- only treat the report as done when its own icon
+             flipped to Success, never inherit an older report's status.
+          2. Any text inside the row matching STATUS_RUNNING / STATUS_DONE.
+          3. The row's title/alt attributes.
+
+        Returns "" if no matching row is found (e.g. the row has not been
+        rendered yet right after the wizard submitted).
+        """
         try:
-            # Look for any element whose text mentions the report name and a
-            # status keyword.
-            xpath = (
-                f"//*[contains(.,'{report_name}')]"
-                f"//*[contains(.,'{STATUS_RUNNING}')"
-                f" or contains(.,'{STATUS_DONE}')]"
-                f" | //*[contains(.,'{report_name}')]"
-                f"[contains(.,'{STATUS_RUNNING}')"
-                f" or contains(.,'{STATUS_DONE}')]"
+            rows = self._d.find_elements(
+                By.XPATH, "//tr[@cr='true' and @cm]"
             )
-            els = self._d.find_elements(By.XPATH, xpath)
-            for el in els:
-                txt = (el.text or "").strip()
-                if STATUS_DONE.lower() in txt.lower():
+            best_id = -1
+            best_row = None
+            for r in rows:
+                try:
+                    tds = r.find_elements(By.TAG_NAME, "td")
+                    if len(tds) < 3:
+                        continue
+                    if not any(
+                        (td.text or "").strip() == report_name for td in tds
+                    ):
+                        continue
+                    cp = r.get_attribute("cp") or ""
+                    rid = -1
+                    parts = cp.split("|")
+                    if len(parts) >= 2:
+                        try:
+                            rid = int(parts[1].strip())
+                        except ValueError:
+                            pass
+                    if rid < 0:
+                        try:
+                            rid = int((tds[1].text or "").strip())
+                        except ValueError:
+                            rid = -1
+                    if rid > best_id:
+                        best_id = rid
+                        best_row = r
+                except Exception:
+                    continue
+            if best_row is None:
+                return ""
+            return self._read_row_status(best_row)
+        except Exception:
+            return ""
+
+    def _read_row_status(self, row) -> str:
+        """Read the status signal from a single report ``<tr>``."""
+        try:
+            # 1. Icon background-image URL -- the most reliable signal.
+            #    Report_Success.png = done; anything else = still running.
+            #    We deliberately treat unknown icons as RUNNING so a
+            #    half-generated report is never mistaken for finished.
+            icons = row.find_elements(By.CSS_SELECTOR, "div.EmIcon")
+            saw_icon = False
+            for icon in icons:
+                try:
+                    style = icon.get_attribute("style") or ""
+                except Exception:
+                    continue
+                saw_icon = True
+                low = style.lower()
+                if "report_success" in low or "success" in low:
                     return STATUS_DONE
-                if STATUS_RUNNING.lower() in txt.lower():
+                if "running" in low or "process" in low or "wait" in low:
                     return STATUS_RUNNING
+                # Unknown icon -- fall through to text checks below.
+            # 2. Status text inside the row (some layouts put it in a cell).
+            try:
+                txt = (row.text or "").strip()
+                low_txt = txt.lower()
+                if STATUS_DONE.lower() in low_txt:
+                    return STATUS_DONE
+                if STATUS_RUNNING.lower() in low_txt:
+                    return STATUS_RUNNING
+            except Exception:
+                pass
+            # 3. Row title/alt attributes.
+            for attr in ("title", "alt"):
+                try:
+                    v = row.get_attribute(attr) or ""
+                    low_v = v.lower()
+                    if STATUS_DONE.lower() in low_v:
+                        return STATUS_DONE
+                    if STATUS_RUNNING.lower() in low_v:
+                        return STATUS_RUNNING
+                except Exception:
+                    continue
+            # 4. We have a row with an icon but no recognizable status. Assume
+            #    still running -- safer than assuming done.
+            if saw_icon:
+                return STATUS_RUNNING
             return ""
         except Exception:
             return ""
