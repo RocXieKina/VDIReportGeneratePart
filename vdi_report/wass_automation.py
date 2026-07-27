@@ -43,10 +43,40 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException
 
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+def _ci(label: str) -> str:
+    """Build a robust, case-insensitive XPath that matches *label* as text.
+
+    wass is a Matrix42 Enterprise Manager customization. Its buttons are
+    rendered as ``<div id="Button<guid>">Label</div>`` widgets, and it also
+    uses Kendo UI (``.k-button``). To be resilient we match a label against
+    several element shapes:
+
+      * any element whose own text equals *label* (case-insensitive)
+      * any element whose own text contains *label* (case-insensitive)
+      * a Matrix42 button div (``div[starts-with(@id,'Button')]``) whose text
+        contains *label*
+      * a Kendo button (``.k-button``) whose text contains *label*
+      * an element with ``title``/``aria-label`` containing *label*
+    """
+    low = label.lower()
+    upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lower = "abcdefghijklmnopqrstuvwxyz"
+    tl = f"translate(text(),'{upper}','{lower}')"
+    tns = f"translate(normalize-space(.),'{upper}','{lower}')"
+    return (
+        f"//*[normalize-space(translate(text(),'{upper}','{lower}'))='{low}']"
+        f" | //*[contains(normalize-space(translate(text(),'{upper}','{lower}')),'{low}')]"
+        f" | //div[starts-with(@id,'Button')][contains({tns},'{low}')]"
+        f" | //*[(contains(@class,'k-button') or contains(@class,'btn'))][contains({tns},'{low}')]"
+        f" | //*[contains(@title,'{label}') or contains(@aria-label,'{label}')]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -55,76 +85,37 @@ logger = logging.getLogger(__name__)
 # strings if the real wass UI uses different wording.
 # ---------------------------------------------------------------------------
 DEFAULT_LOCATORS: Dict[str, Any] = {
-    # Top-level navigation. All text-based XPaths use translate() so they are
-    # case-insensitive -- wass uses "Create report" (mixed case), not the
-    # lowercase "create report" the user described verbally.
+    # Top-level navigation: prefer the stable Matrix42 nav id, fall back to text.
     "inventory_tab": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='inventory']",
+        By.CSS_SELECTOR,
+        "#MainNaviBottom_2, #MainNaviBottom_2 span",
     ),
-    "create_report": (
-        By.XPATH,
-        "//*[contains(normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'create report')]",
-    ),
-    "new_report": (
-        By.XPATH,
-        "//*[contains(normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'new report')]",
-    ),
+    # Wizard buttons: use _ci() so each label matches across Matrix42 button
+    # divs (id^='Button'), Kendo buttons (.k-button) and plain text, all
+    # case-insensitively.
+    "create_report": (By.XPATH, _ci("create report")),
+    "new_report": (By.XPATH, _ci("new report")),
     # Report name input -- any visible text input near the top of the wizard.
     "report_name_input": (By.CSS_SELECTOR, "input[type='text']"),
     # Import step
-    "import_button": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='import']",
-    ),
-    "import_computer_list_link": (
-        By.XPATH,
-        "//*[contains(normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'import computer list')]",
-    ),
+    "import_button": (By.XPATH, _ci("import")),
+    "import_computer_list_link": (By.XPATH, _ci("import computer list")),
     "import_textarea": (By.CSS_SELECTOR, "textarea"),
     # Wizard navigation
-    "ok_button": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='ok']",
-    ),
-    "next_button": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='next']",
-    ),
-    "result_elements_button": (
-        By.XPATH,
-        "//*[contains(normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'result element')]",
-    ),
-    "login_group": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='login']",
-    ),
+    "ok_button": (By.XPATH, _ci("ok")),
+    "next_button": (By.XPATH, _ci("next")),
+    "result_elements_button": (By.XPATH, _ci("result element")),
+    "login_group": (By.XPATH, _ci("login")),
     # Status / refresh
     "refresh_button": (
         By.XPATH,
         "//button[contains(@title,'refresh') or contains(@aria-label,'refresh')]"
-        " | //*[contains(@class,'refresh')]",
+        " | //*[contains(@class,'refresh')]"
+        " | //*[contains(@title,'Refresh') or contains(@aria-label,'Refresh')]",
     ),
     # Result dialog
-    "result_menu_item": (
-        By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='result']",
-    ),
-    "excel_download_button": (
-        By.XPATH,
-        "//*[contains(normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'excel download')]",
-    ),
+    "result_menu_item": (By.XPATH, _ci("result")),
+    "excel_download_button": (By.XPATH, _ci("excel download")),
     "download_link": (
         By.XPATH,
         "//a[contains(.,'Click here to download')]"
@@ -252,10 +243,7 @@ class WassReportAutomator:
 
     def _click(self, name: str, timeout: float = 20) -> None:
         by, val = self._loc(name)
-        el = self._wait(timeout).until(
-            EC.element_to_be_clickable((by, val)),
-            message=f"locator '{name}' not clickable",
-        )
+        el = self._find_clickable(name, by, val, timeout)
         self._scroll_into_view(el)
         try:
             el.click()
@@ -266,6 +254,47 @@ class WassReportAutomator:
             logger.debug("normal click failed (%s); retrying via JS", type(e).__name__)
             self._d.execute_script("arguments[0].click();", el)
         logger.info("clicked: %s", name)
+
+    def _find_clickable(self, name: str, by, val, timeout: float):
+        """Find *name* in the top document; if not found, search every iframe.
+
+        Matrix42 wizard content is sometimes rendered inside an <iframe>, in
+        which case the top-document XPath won't see it. We try the top document
+        first, then walk all iframes (one level deep) and retry there,
+        restoring the top frame afterwards.
+        """
+        try:
+            return self._wait(timeout).until(
+                EC.element_to_be_clickable((by, val)),
+                message=f"locator '{name}' not clickable",
+            )
+        except Exception:
+            pass
+
+        # Try each iframe.
+        self._d.switch_to.default_content()
+        iframes = self._d.find_elements(By.TAG_NAME, "iframe")
+        logger.debug(
+            "top document miss for '%s'; searching %d iframe(s)", name, len(iframes)
+        )
+        for idx, f in enumerate(iframes):
+            try:
+                self._d.switch_to.default_content()
+                self._d.switch_to.frame(f)
+                el = self._wait(3).until(
+                    EC.element_to_be_clickable((by, val)),
+                    message=f"locator '{name}' not in iframe {idx}",
+                )
+                logger.debug("'%s' found in iframe %d", name, idx)
+                return el
+            except Exception:
+                continue
+            finally:
+                try:
+                    self._d.switch_to.default_content()
+                except Exception:
+                    pass
+        raise TimeoutException(f"locator '{name}' not clickable (top doc + iframes)")
 
     def _scroll_into_view(self, el) -> None:
         try:
