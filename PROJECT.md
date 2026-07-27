@@ -130,7 +130,32 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 2. 新增 `_click_context_menu_item(name, label, timeout)`：scope 到 `.context-menu-item`，等 **presence**（不是 clickable——jQuery contextMenu 的 `<li>` 常过不了 Selenium 的 clickable 检查），JS click 触发插件委托 handler
 3. `download_result` 先试新 helper，失败再退回 `_click("result_menu_item")`
 
-### 6.4 其他坑
+### 6.4 ⚠️ 已修复的关键 bug：报告列表里多条同名报告，找错了行
+
+**症状**：报表列表累积了用户所有历史报告，按名字匹配会返回多条（重跑、或 `-02`/`-03` chunk 后缀子串匹配基础名），旧代码取第一个匹配——不一定是刚生成的那条。
+
+**根因**：旧 `download_result` 用 `//tr[td[contains(.,'报告名')]]` 取第一个匹配。`contains` 会把 `VDI-laptop-lastlogin-2026-07-27` 和 `-02` 后缀的都匹配上，且不保证顺序。
+
+**wass 报告行结构**（从用户 HTML 提取）：
+```html
+<tr cr="true" cm="Menu1" cp="#id#|32806||" class="TrMarked">
+  <td><div class="EmIcon" style="...Report_Success.png"></div></td>  <!-- 图标 -->
+  <td>32806</td>              <!-- 报告 ID（单调递增）-->
+  <td>name test</td>          <!-- 报告名 -->
+  <td>Private</td>            <!-- scope -->
+  <td>Roc Xie, FG-CN-60</td>  <!-- owner -->
+  <td>27.07.2026, 13:09</td>  <!-- 创建时间（德式 DD.MM.YYYY, HH:MM）-->
+</tr>
+```
+
+**修复**（已合入）：新增 `_find_report_row(report_name, timeout)`：
+- 找所有 `tr[@cr='true' and @cm]`（带右键菜单的报告行）
+- 名字 cell 文本**精确等于** report_name（不是子串），避免 `-02` 误匹配
+- 从 `cp` 属性 `#id#|32806||` 解析报告 ID，fallback 到第 2 个 `<td>` 文本
+- 挑 ID **最大**的那条（ID 单调递增 = 最新生成的）
+- `download_result` 替换旧的 `row_xpaths` 循环
+
+### 6.5 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next

@@ -545,6 +545,77 @@ class WassReportAutomator:
             f"candidates: {last_seen or '(none)'}"
         )
 
+    def _find_report_row(self, report_name: str, timeout: float = 20):
+        """Find the *newest* report-list row whose name matches *report_name*.
+
+        wass renders the report list as rows
+        ``<tr cr="true" cm="Menu1" cp="#id#|<id>||">`` with cells:
+        [icon, id, name, scope, owner, date]. The list accumulates **every**
+        report the user ever created, so matching by name alone can return
+        multiple rows -- re-runs of the same day, or chunk suffixes
+        (``-02``/``-03``) that substring-match the base name. Report IDs are
+        monotonic, so the newest report has the largest ID; we pick that one.
+
+        The name match is **exact** (cell text == report_name), not a
+        substring, so ``VDI-laptop-lastlogin-2026-07-27`` will NOT match
+        ``VDI-laptop-lastlogin-2026-07-27-02``.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rows = self._d.find_elements(
+                By.XPATH, "//tr[@cr='true' and @cm]"
+            )
+            candidates = []  # (id_int, row_el, info_str)
+            for r in rows:
+                try:
+                    tds = r.find_elements(By.TAG_NAME, "td")
+                    if len(tds) < 3:
+                        continue
+                    # Find the cell whose text exactly equals report_name
+                    # (don't hardcode the index -- column order could shift).
+                    matched = False
+                    for td in tds:
+                        if (td.text or "").strip() == report_name:
+                            matched = True
+                            break
+                    if not matched:
+                        continue
+                    # Report ID from the cp attribute: "#id#|32806||" -> 32806.
+                    cp = r.get_attribute("cp") or ""
+                    rid = -1
+                    parts = cp.split("|")
+                    if len(parts) >= 2:
+                        try:
+                            rid = int(parts[1].strip())
+                        except ValueError:
+                            pass
+                    # Fallback: 2nd <td> text is usually the ID.
+                    if rid < 0:
+                        try:
+                            rid = int((tds[1].text or "").strip())
+                        except ValueError:
+                            rid = -1
+                    date_text = (tds[-1].text or "").strip() if tds else ""
+                    candidates.append(
+                        (rid, r, f"id={rid} date={date_text!r}")
+                    )
+                except Exception:
+                    continue
+            if candidates:
+                # Highest ID = newest report.
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                picked_id, picked_row, picked_info = candidates[0]
+                logger.info(
+                    "report row: %d candidate(s) for '%s'; picked %s "
+                    "(newest by ID)",
+                    len(candidates), report_name, picked_info,
+                )
+                return picked_row
+            time.sleep(1)
+        raise TimeoutException(
+            f"no report row matching '{report_name}' found within {timeout}s"
+        )
+
     # ------------------------------------------------------------------ #
     # High-level wizard steps
     # ------------------------------------------------------------------ #
@@ -976,26 +1047,10 @@ class WassReportAutomator:
         before = set(self.download_dir.glob("*.xlsx"))
         logger.info("opening Result for '%s'", report_name)
 
-        # Locate the report row. Prefer a <tr> or <td> that contains the
-        # report name as its own text (not a giant container like <body>).
-        row_xpaths = [
-            f"//tr[td[contains(.,'{report_name}')]]",
-            f"//td[normalize-space()='{report_name}']",
-            f"//*[contains(.,'{report_name}') and not(*)]",
-            f"//*[contains(.,'{report_name}')]",
-        ]
-        row = None
-        for xp in row_xpaths:
-            try:
-                row = self._wait(5).until(
-                    EC.presence_of_element_located((By.XPATH, xp)),
-                    message=f"report row via {xp[:40]}",
-                )
-                break
-            except Exception:
-                continue
-        if row is None:
-            raise TimeoutException(f"report row '{report_name}' not found")
+        # Locate the report row. The list accumulates every report the user
+        # ever created, so we match the name exactly and pick the newest by
+        # report ID (IDs are monotonic). See _find_report_row for details.
+        row = self._find_report_row(report_name, timeout=20)
 
         # Right-click the row to open the context menu.
         try:
