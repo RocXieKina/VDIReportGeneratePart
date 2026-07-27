@@ -57,3 +57,67 @@ EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xlsb", ".xls")
 
 # How many days back to look for an AD report if the latest day is empty.
 AD_MAX_LOOKBACK_DAYS = 30
+
+# ===========================================================================
+# Asset report (Checkout PC List) + wass.bmwgroup.net automation
+# ===========================================================================
+
+# Asset report root: contains YYYY-MM-DD subfolders, each holding a
+# "Checkout PC List MMDD.xlsx" file.
+ASSET_REPORT_ROOT = (
+    r"\\china.bmw.corp\winfs\Beijing-Data\IT China\FG-CN-6_Infra\Infrastructure"
+    r"\09_Support_Center\01_IT_Support\01_Applications\06_Scripts"
+    r"\VDI auto report\Asset report"
+)
+
+# Full header of the Checkout PC List asset report (used for validation).
+ASSET_EXPECTED_COLUMNS = [
+    "Name",
+    "Item",
+    "Status",
+    "StatusReason",
+    "Manufacturer",
+    "Model",
+    "S/N",
+    "Responsible Q Number",
+    "Responsible Name",
+    "PurchaseDate",
+    "ReadyReturnTime",
+    "WarrantyEndDate",
+    "Comments",
+    "Responsible Company",
+    "Responsible Department",
+    "Responsible Email",
+]
+
+# Only the computer "Name" column is needed for the wass import.
+ASSET_KEEP_COLUMNS = ["Name"]
+
+# Filename prefix of the asset report inside each YYYY-MM-DD folder.
+ASSET_FILE_PREFIX = "Checkout PC List"
+
+# How many days back to look for an asset report folder.
+ASSET_MAX_LOOKBACK_DAYS = 30
+
+# --- wass.bmwgroup.net automation ---
+WASS_URL = "https://wass.bmwgroup.net"
+
+# wass "Import computer list" accepts at most 5000 entries. Use 4999 to be safe.
+WASS_IMPORT_CHUNK_SIZE = 4999
+
+# Polling interval (seconds) when waiting for report completion.
+WASS_POLL_INTERVAL_SECONDS = 10
+
+# Hard timeout (seconds) for waiting for a single report to finish.
+WASS_REPORT_TIMEOUT_SECONDS = 1800
+
+# Result elements to select in the wass wizard (under the "login" group).
+WASS_RESULT_ELEMENTS = [
+    "Last Logon",
+    "Last User",
+    "Last User(Account)",
+    "Last User(Email)",
+]
+
+# Browser to use for automation: "edge" (default on Windows) or "chrome".
+WASS_BROWSER = "edge"
