@@ -112,11 +112,14 @@ WASS_POLL_INTERVAL_SECONDS = 10
 WASS_REPORT_TIMEOUT_SECONDS = 1800
 
 # Result elements to select in the wass wizard (under the "login" group).
+# These must EXACTLY match the <div class="EmText EmTextClick"> text in the
+# wass output-element picker, including the space before the parenthesis
+# (verified from the inspected HTML: "Last User (Account)", "Last User (Email)").
 WASS_RESULT_ELEMENTS = [
     "Last Logon",
     "Last User",
-    "Last User(Account)",
-    "Last User(Email)",
+    "Last User (Account)",
+    "Last User (Email)",
 ]
 
 # Browser to use for automation: "edge" (default on Windows) or "chrome".

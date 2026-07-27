@@ -626,17 +626,31 @@ class WassReportAutomator:
         #     Matrix42 builds refuse to toggle hidden inputs).
         for label in elements:
             try:
-                # Find the label div whose text matches (case-insensitive).
-                label_div = self._wait(10).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH,
-                         f"//div[contains(@class,'EmTextClick')]"
-                         f"[normalize-space(translate(text(),"
-                         f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))"
-                         f"=translate('{label}','ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')]")
-                    ),
-                    message=f"label '{label}' not found",
-                )
+                # Find the label div whose text matches. Matching is
+                # case-insensitive AND whitespace-insensitive: the wass HTML
+                # uses "Last User (Account)" (space before "("), but callers
+                # may pass "Last User(Account)". We normalize both sides by
+                # lowercasing and stripping all spaces, then compare.
+                key = label.lower().replace(" ", "")
+                label_div = None
+                deadline_lbl = time.time() + 10
+                while time.time() < deadline_lbl:
+                    candidates = self._d.find_elements(
+                        By.XPATH, "//div[contains(@class,'EmTextClick')]"
+                    )
+                    for el in candidates:
+                        try:
+                            txt = (el.text or "").lower().replace(" ", "")
+                        except Exception:
+                            continue
+                        if txt == key:
+                            label_div = el
+                            break
+                    if label_div is not None:
+                        break
+                    time.sleep(0.3)
+                if label_div is None:
+                    raise TimeoutException(f"label '{label}' not found")
                 # The EmCheckbox div is in the same <tr>, last <td>. It contains
                 # <input id="Choice_NNN" ...> -- the id is the toggle key.
                 row = label_div.find_element(By.XPATH, "./ancestor::tr[1]")
