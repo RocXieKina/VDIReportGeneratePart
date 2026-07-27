@@ -65,17 +65,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--output-dir",
-        default=str(Path.cwd() / "output"),
-        help=f"Directory to write {config.FINAL_REPORT_FILENAME}.",
+        default=None,
+        help=(
+            "Directory to write the final report. Defaults to "
+            "FINAL_REPORT_ROOT (BMW 'Status gengerate report' share)."
+        ),
     )
     p.add_argument(
         "--keep-all-vdi",
         action="store_true",
-        help=(
-            "Keep every VDI assigned user (LEFT join with lastlogon). "
-            "Default: INNER join -- only people who use BOTH a VDI and a "
-            "laptop appear in the final report."
-        ),
+        help="Deprecated: LEFT join is now always on (all VDI rows kept).",
     )
     p.add_argument(
         "-v",
@@ -101,14 +100,14 @@ def main(argv=None) -> int:
         asset_root=Path(args.asset_root),
         lastlogon_path=Path(args.lastlogon_file) if args.lastlogon_file else None,
         checkout_path=Path(args.checkout_file) if args.checkout_file else None,
-        output_dir=Path(args.output_dir),
-        keep_all_vdi=args.keep_all_vdi,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        vdi_ad_dir=Path(args.output_dir) if args.output_dir else None,
     )
     df = builder.run()
     if df is None:
         print("No report generated. Check the logs above.", file=sys.stderr)
         return 1
-    print(f"Done. {len(df)} rows written to {args.output_dir}")
+    print(f"Done. {len(df)} rows written to {builder.output_dir}")
     return 0
 
 

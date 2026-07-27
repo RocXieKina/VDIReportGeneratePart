@@ -4,7 +4,7 @@ Joins three data sources on top of the VDI+AD master report produced by
 ``run.py``:
 
   VDI_AD_final.xlsx  (master, one row per VDI assigned user)
-    [INNER|LEFT] JOIN lastlogon.xlsx
+    LEFT JOIN lastlogon.xlsx
         on Assigned Users == LOGIN - LAST USER (ACCOUNT)
         -> adds HOSTNAME / MACHINEID / LOGIN - LAST LOGON / LOGIN - LAST USER
            / LOGIN - LAST USER (EMAIL)
@@ -13,13 +13,19 @@ Joins three data sources on top of the VDI+AD master report produced by
         -> adds Responsible Q Number / Responsible Name / Responsible Company
            / Responsible Department / Responsible Email
 
-The INNER join (default) yields only people who use BOTH a VDI and a laptop
--- the "即使用VDI也使用laptop" case the user asked for. ``--keep-all-vdi``
-switches to a LEFT join so VDI users without a laptop match are kept (with
-NaN lastlogon/asset columns).
+UNION semantics (default): every VDI row is preserved as exactly one row in
+the output. If a VDI user matches multiple laptops, the laptop-derived
+columns are concatenated into a single cell using ``MULTI_LAPTOP_SEPARATOR``
+(";" by default, e.g. "host1; host2; host3"). VDI users without any laptop
+match are kept with empty laptop columns. The VDI data is the unique primary
+key -- the report never fans out to multiple rows per VDI entry.
 
 lastlogon rows whose ``LOGIN - LAST USER (ACCOUNT)`` is empty are dropped
 before the join (the user said empty ones don't matter).
+
+Output goes to ``FINAL_REPORT_ROOT`` (BMW "Status gengerate report" share)
+as ``<basename>_<YYYY-MM-DD>_<HHMMSS>.xlsx`` so each run is a unique
+archived snapshot.
 """
 from __future__ import annotations
 
@@ -195,13 +201,18 @@ def join_vdi_with_lastlogon(
     lastlogon_df: pd.DataFrame,
     vdi_key: str = "Assigned Users",
     lastlogon_key: str = "LOGIN - LAST USER (ACCOUNT)",
-    how: str = "inner",
+    how: str = "left",
 ) -> pd.DataFrame:
     """Join VDI+AD data with the lastlogon report.
 
     Matching is case-insensitive and ignores surrounding whitespace. The
     lastlogon account column is dropped after the join because it duplicates
     VDI's ``Assigned Users``.
+
+    A ``__row_id__`` column is added to the VDI side before the merge so that
+    each original VDI row can be uniquely identified later for aggregation
+    (a VDI user may match multiple laptops -> multiple rows after merge ->
+    must be collapsed back to one row).
     """
     vdi_cmap = _column_map(vdi_df)
     ll_cmap = _column_map(lastlogon_df)
@@ -217,6 +228,9 @@ def join_vdi_with_lastlogon(
 
     left = vdi_df.copy()
     right = lastlogon_df.copy()
+
+    # Tag each VDI row with a stable id so we can group back after fan-out.
+    left["__row_id__"] = range(len(left))
 
     left["__key__"] = _clean_key(left[vdi_key_col])
     right["__key__"] = _clean_key(right[ll_key_col])
@@ -235,7 +249,7 @@ def join_vdi_with_lastlogon(
     hostname_col = merged_cmap.get("hostname")
     matched = int(merged[hostname_col].notna().sum()) if hostname_col else 0
     logger.info(
-        "Joined VDI + lastlogon (%s): %d rows, %d VDI rows matched a laptop login",
+        "Joined VDI + lastlogon (%s): %d rows (pre-aggregation), %d VDI rows matched a laptop login",
         how,
         len(merged),
         matched,
@@ -292,10 +306,66 @@ def join_with_checkout(
 
 
 # --------------------------------------------------------------------------- #
+# aggregation: collapse multiple laptops per VDI user into one row
+# --------------------------------------------------------------------------- #
+def _join_nonnull(series: pd.Series) -> str:
+    """Join non-null, non-empty values with MULTI_LAPTOP_SEPARATOR."""
+    vals = series.dropna()
+    vals = vals[vals.astype(str).str.strip() != ""]
+    vals = vals[~vals.astype(str).str.lower().isin(["nan", "none", "nat"])]
+    if vals.empty:
+        return ""
+    return config.MULTI_LAPTOP_SEPARATOR.join(vals.astype(str))
+
+
+def aggregate_by_vdi_row(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse multiple laptop rows per VDI entry into a single row.
+
+    Groups by ``__row_id__`` (assigned in ``join_vdi_with_lastlogon``) and
+    concatenates laptop-derived columns with ``MULTI_LAPTOP_SEPARATOR``.
+    VDI/AD columns are taken from the first row of each group (they are
+    identical across laptop matches for the same VDI entry).
+    """
+    if "__row_id__" not in df.columns:
+        logger.warning("__row_id__ column missing; skipping aggregation")
+        return df
+
+    cmap = _column_map(df)
+    laptop_cols = [
+        c for c in config.FINAL_REPORT_COLUMNS
+        if c.lower() in cmap and c.lower() not in {
+            "id", "ipv4 address", "assigned users",
+            "departmentcode", "name", "emailaddress",
+        }
+    ]
+
+    agg_map: dict = {}
+    for col in config.FINAL_REPORT_COLUMNS:
+        actual = cmap.get(col.lower())
+        if actual is None:
+            continue
+        if col in laptop_cols:
+            agg_map[actual] = _join_nonnull
+        else:
+            agg_map[actual] = "first"
+
+    before = len(df)
+    result = df.groupby("__row_id__", as_index=False, dropna=False).agg(agg_map)
+    result = result.drop(columns=["__row_id__"])
+    logger.info(
+        "Aggregated %d laptop rows -> %d VDI rows (separator='%s')",
+        before,
+        len(result),
+        config.MULTI_LAPTOP_SEPARATOR,
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # orchestrator
 # --------------------------------------------------------------------------- #
 class FinalReportBuilder:
-    """Build ``VDI_Laptop_Asset_final.xlsx`` from three inputs.
+    """Build ``VDI_Laptop_Asset_final_<date>_<time>.xlsx`` from three inputs.
 
     Parameters
     ----------
@@ -312,10 +382,13 @@ class FinalReportBuilder:
         Explicit path to the Checkout PC List .xlsx. If None, auto-discovered
         in the same folder as the lastlogon file.
     output_dir:
-        Where to write the final report. Defaults to ``cwd/output``.
+        Where to write the final report. Defaults to ``FINAL_REPORT_ROOT``
+        (BMW "Status gengerate report" share). Falls back to ``cwd/output``
+        if the share is not writable.
     keep_all_vdi:
-        If True, use a LEFT join (keep VDI rows without a laptop match).
-        Default False -> INNER join (only people who use both VDI and laptop).
+        Deprecated -- always True now. LEFT join is the default (union
+        semantics: all VDI rows are preserved). Kept for backwards
+        compatibility with existing CLI flags.
     """
 
     def __init__(
@@ -325,14 +398,34 @@ class FinalReportBuilder:
         lastlogon_path: Optional[Path] = None,
         checkout_path: Optional[Path] = None,
         output_dir: Optional[Path] = None,
-        keep_all_vdi: bool = False,
+        vdi_ad_dir: Optional[Path] = None,
+        keep_all_vdi: bool = True,
     ) -> None:
         self.vdi_ad_path = Path(vdi_ad_path) if vdi_ad_path else None
         self.asset_root = Path(asset_root) if asset_root else Path(config.ASSET_REPORT_ROOT)
         self.lastlogon_path = Path(lastlogon_path) if lastlogon_path else None
         self.checkout_path = Path(checkout_path) if checkout_path else None
-        self.output_dir = Path(output_dir) if output_dir else Path.cwd() / "output"
-        self.keep_all_vdi = keep_all_vdi
+        # Where to look for VDI_AD_final.xlsx if vdi_ad_path is not given.
+        # Defaults to cwd/output (pipeline A's output dir).
+        self.vdi_ad_dir = Path(vdi_ad_dir) if vdi_ad_dir else Path.cwd() / "output"
+        # Default to FINAL_REPORT_ROOT (BMW share); fall back to cwd/output
+        # if the caller didn't specify and the share path is unreachable.
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+        else:
+            share = Path(config.FINAL_REPORT_ROOT)
+            try:
+                share.mkdir(parents=True, exist_ok=True)
+                self.output_dir = share
+            except Exception:
+                logger.warning(
+                    "FINAL_REPORT_ROOT not writable (%s); falling back to cwd/output",
+                    share,
+                )
+                self.output_dir = Path.cwd() / "output"
+        # keep_all_vdi is now always True (union semantics). The attribute is
+        # kept for backwards compatibility but has no effect.
+        self.keep_all_vdi = True
 
     # ------------------------------------------------------------------ #
     def run(self, today: Optional[dt.date] = None) -> Optional[pd.DataFrame]:
@@ -359,9 +452,8 @@ class FinalReportBuilder:
             logger.error("lastlogon file has no usable rows; aborting")
             return None
 
-        # 3. join VDI + lastlogon
-        how = "left" if self.keep_all_vdi else "inner"
-        merged = join_vdi_with_lastlogon(vdi_df, lastlogon_df, how=how)
+        # 3. LEFT join VDI + lastlogon (union: keep all VDI rows)
+        merged = join_vdi_with_lastlogon(vdi_df, lastlogon_df, how="left")
         if merged.empty:
             logger.warning("VDI + lastlogon join produced 0 rows")
 
@@ -374,9 +466,14 @@ class FinalReportBuilder:
         else:
             logger.warning("Checkout PC List not found; Responsible columns will be empty")
 
-        # 5. order columns + write
+        # 5. Aggregate: collapse multiple laptops per VDI row into one row
+        merged = aggregate_by_vdi_row(merged)
+
+        # 6. order columns + write with timestamped filename
         final_df = self._order_columns(merged)
-        final_out = self.output_dir / config.FINAL_REPORT_FILENAME
+        timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        final_name = f"{config.FINAL_REPORT_BASENAME}_{timestamp}.xlsx"
+        final_out = self.output_dir / final_name
         final_df.to_excel(final_out, index=False)
         logger.info("Final report written: %s (%d rows)", final_out, len(final_df))
         logger.info("=== Final report builder finished ===")
@@ -389,7 +486,9 @@ class FinalReportBuilder:
                 logger.error("VDI+AD report not found: %s", self.vdi_ad_path)
                 return None
             return self.vdi_ad_path
-        guessed = self.output_dir / config.VDI_AD_FINAL_FILENAME
+        # Look in vdi_ad_dir (pipeline A's output), NOT in output_dir
+        # (which is the final report dir -- a different location).
+        guessed = self.vdi_ad_dir / config.VDI_AD_FINAL_FILENAME
         if guessed.is_file():
             logger.info("Auto-found VDI+AD report: %s", guessed)
             return guessed

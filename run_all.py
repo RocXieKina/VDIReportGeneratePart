@@ -57,7 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--output-dir",
         default=str(Path.cwd() / "output"),
-        help="Where VDI_final/VDI_AD_final/VDI_Laptop_Asset_final land.",
+        help="Where intermediate VDI_AD_final.xlsx lands (pipeline A).",
+    )
+    p.add_argument(
+        "--final-output-dir",
+        default=None,
+        help="Where the final report lands (pipeline C). Defaults to "
+             "FINAL_REPORT_ROOT (BMW 'Status gengerate report' share).",
     )
     p.add_argument(
         "--vdi-root",
@@ -106,7 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--keep-all-vdi",
         action="store_true",
-        help="Pipeline C: keep VDI users without a laptop match (LEFT join).",
+        help="Deprecated: LEFT join is now always on (all VDI rows kept). "
+             "Kept for backwards compatibility; has no effect.",
     )
     # --- stage skip (debugging) ---
     p.add_argument("--skip-a", action="store_true", help="Skip pipeline A.")
@@ -134,6 +141,7 @@ def run_pipeline_a(args: argparse.Namespace) -> bool:
             vdi_root=args.vdi_root,
             ad_root=args.ad_root,
             output_dir=args.output_dir,
+            write_vdi_final=False,  # skip VDI_final.xlsx; only VDI_AD_final.xlsx is needed
         )
         df = analyzer.run()
     except Exception as e:
@@ -173,10 +181,13 @@ def run_pipeline_b(args: argparse.Namespace, today: dt.date) -> bool:
 def run_pipeline_c(args: argparse.Namespace) -> bool:
     logger.info("=== Pipeline C: final integration ===")
     try:
+        # Don't pass output_dir -- let FinalReportBuilder default to
+        # FINAL_REPORT_ROOT (BMW "Status gengerate report" share).
+        # --final-output-dir overrides if the caller wants a different path.
         builder = FinalReportBuilder(
             asset_root=args.asset_root,
-            output_dir=args.output_dir,
-            keep_all_vdi=args.keep_all_vdi,
+            output_dir=args.final_output_dir,
+            vdi_ad_dir=args.output_dir,
         )
         df = builder.run()
     except Exception as e:
@@ -256,9 +267,13 @@ def main(argv=None) -> int:
         label = {"A": "A: VDI+AD merge", "B": "B: wass last-login",
                  "C": "C: final integration"}[stage]
         print(f"  {label:<25} {status}")
-    final_out = output_dir / config.FINAL_REPORT_FILENAME
-    if results["C"] == "ok" and final_out.is_file():
-        print(f"\nFinal report: {final_out}")
+    if results["C"] == "ok":
+        # Find the most recent timestamped file in the final output dir.
+        final_dir = Path(args.final_output_dir or config.FINAL_REPORT_ROOT)
+        pattern = f"{config.FINAL_REPORT_BASENAME}_*.xlsx"
+        candidates = sorted(final_dir.glob(pattern))
+        if candidates:
+            print(f"\nFinal report: {candidates[-1]}")
     print("=" * 60)
 
     # exit non-zero if A or C failed (B is optional)

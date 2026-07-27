@@ -133,8 +133,25 @@ WASS_BROWSER = "edge"
 # Filename of the VDI+AD merged report produced by run.py (input to this step).
 VDI_AD_FINAL_FILENAME = "VDI_AD_final.xlsx"
 
-# Filename of the final integrated report.
-FINAL_REPORT_FILENAME = "VDI_Laptop_Asset_final.xlsx"
+# Base filename of the final integrated report. The actual file is written as
+# "<base>_<YYYY-MM-DD>_<HHMMSS>.xlsx" so each run produces a unique snapshot
+# that can be archived alongside historical reports.
+FINAL_REPORT_BASENAME = "VDI_Laptop_Asset_final"
+
+# Default output directory for the final report: BMW shared "Status gengerate
+# report" folder. Intermediate files (VDI_AD_final.xlsx) stay in the local
+# output/ folder; only the consolidated report goes to the share.
+FINAL_REPORT_ROOT = (
+    r"\\china.bmw.corp\winfs\Beijing-Data\IT China\FG-CN-6_Infra\Infrastructure"
+    r"\09_Support_Center\01_IT_Support\01_Applications\06_Scripts"
+    r"\VDI auto report\Status gengerate report"
+)
+
+# Separator used when a single VDI user matches multiple laptops. All
+# laptop-derived fields are joined with this separator in a single cell, so
+# the report stays one-row-per-VDI-user (no fan-out). Dashboard code can
+# split on this separator to recover individual laptop rows.
+MULTI_LAPTOP_SEPARATOR = "; "
 
 # --- lastlogon report (downloaded by run_asset.py from wass) ---
 # The file lands in the asset YYYY-MM-DD folder alongside the Checkout PC List.

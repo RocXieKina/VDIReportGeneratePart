@@ -30,12 +30,17 @@ class VDIReportAnalyzer:
         output_dir: Optional[Path] = None,
         explode_users: bool = True,
         keep_vdi_source_col: bool = False,
+        write_vdi_final: bool = True,
     ) -> None:
         self.vdi_root = Path(vdi_root) if vdi_root else Path(config.VDI_REPORT_ROOT)
         self.ad_root = Path(ad_root) if ad_root else Path(config.AD_REPORT_ROOT)
         self.output_dir = Path(output_dir) if output_dir else Path.cwd() / "output"
         self.explode_users = explode_users
         self.keep_vdi_source_col = keep_vdi_source_col
+        # When False, the intermediate VDI_final.xlsx (Z3+Z4 merge only) is
+        # skipped -- run_all.py sets this since the consolidated report is the
+        # only output users care about.
+        self.write_vdi_final = write_vdi_final
 
     # ------------------------------------------------------------------ #
     def run(self) -> Optional[pd.DataFrame]:
@@ -47,14 +52,17 @@ class VDIReportAnalyzer:
         if vdi_df is None or vdi_df.empty:
             logger.error("Step 1 produced no data; aborting pipeline")
             return None
-        vdi_out = self.output_dir / "VDI_final.xlsx"
-        vdi_df.to_excel(vdi_out, index=False)
-        logger.info("Step 1 written: %s (%d rows)", vdi_out, len(vdi_df))
+        if self.write_vdi_final:
+            vdi_out = self.output_dir / "VDI_final.xlsx"
+            vdi_df.to_excel(vdi_out, index=False)
+            logger.info("Step 1 written: %s (%d rows)", vdi_out, len(vdi_df))
+        else:
+            logger.info("Step 1 skipped VDI_final.xlsx write (write_vdi_final=False)")
 
         # --- Step 2: join with AD ---
         final_df = self._step2_join_ad(vdi_df)
         if final_df is None:
-            logger.warning("Step 2 skipped; only VDI_final.xlsx was produced")
+            logger.warning("Step 2 skipped; only VDI data is available")
             return vdi_df
         final_out = self.output_dir / "VDI_AD_final.xlsx"
         final_df.to_excel(final_out, index=False)
