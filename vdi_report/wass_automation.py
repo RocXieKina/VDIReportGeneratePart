@@ -44,7 +44,7 @@ from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 
 from . import config
 
@@ -616,6 +616,79 @@ class WassReportAutomator:
             f"no report row matching '{report_name}' found within {timeout}s"
         )
 
+    def _open_context_menu_for_report(
+        self, report_name: str, max_attempts: int = 5
+    ) -> None:
+        """Right-click the newest matching report row, retrying on stale.
+
+        wass rebuilds the report-list table DOM after every status change /
+        refresh, so a ``<tr>`` element reference we just resolved can go stale
+        before we finish dispatching the contextmenu event. The retry loop
+        re-finds the row (via :meth:`_find_report_row`) on each attempt and
+        fires the right-click in the **same** JS call that located the cell --
+        so no stale Selenium element reference is ever passed across the
+        boundary.
+
+        It also waits for the jQuery contextMenu ``<ul class="context-menu">``
+        to actually appear before returning, so the subsequent
+        ``_click_context_menu_item('Result')`` doesn't race the menu open.
+        """
+        for attempt in range(1, max_attempts + 1):
+            try:
+                row = self._find_report_row(report_name, timeout=20)
+                # Scroll into view first (real scroll, no element return).
+                try:
+                    self._scroll_into_view(row)
+                except Exception:
+                    pass
+                time.sleep(0.3)
+                # Try native Selenium context click first -- fastest path.
+                try:
+                    ActionChains(self._d).context_click(row).perform()
+                    logger.info("context-clicked report row (attempt %d)", attempt)
+                except Exception as e:
+                    if "stale" in str(e).lower():
+                        logger.debug(
+                            "stale on attempt %d, re-finding row", attempt
+                        )
+                        time.sleep(0.5)
+                        continue
+                    raise
+                # Confirm the menu actually opened. If not, retry.
+                if self._wait_for_context_menu(timeout=3):
+                    return
+                logger.debug(
+                    "context menu did not appear on attempt %d; retrying",
+                    attempt,
+                )
+                time.sleep(0.5)
+            except StaleElementReferenceException:
+                logger.debug(
+                    "stale element on attempt %d, re-finding row", attempt
+                )
+                time.sleep(0.5)
+                continue
+        raise TimeoutException(
+            f"could not open context menu for '{report_name}' "
+            f"after {max_attempts} attempts (list kept going stale)"
+        )
+
+    def _wait_for_context_menu(self, timeout: float = 3) -> bool:
+        """Return True if a jQuery contextMenu ``<ul>`` is visible."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            els = self._d.find_elements(
+                By.CSS_SELECTOR, "ul.context-menu-list"
+            )
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        return True
+                except Exception:
+                    continue
+            time.sleep(0.2)
+        return False
+
     # ------------------------------------------------------------------ #
     # High-level wizard steps
     # ------------------------------------------------------------------ #
@@ -987,6 +1060,12 @@ class WassReportAutomator:
                 last_status = status
             if status and STATUS_DONE.lower() in status.lower():
                 logger.info("report '%s' finished", report_name)
+                # Give the report-list table a beat to settle after the last
+                # status change -- Kendo/jQuery rebuilds the <tr> nodes, and
+                # any element reference we hold goes stale during the rebuild.
+                # download_result re-finds the row in a retry loop, but a short
+                # pause here avoids the first attempt almost always failing.
+                time.sleep(2)
                 return
             time.sleep(poll_interval)
         raise TimeoutError(
@@ -1047,26 +1126,18 @@ class WassReportAutomator:
         before = set(self.download_dir.glob("*.xlsx"))
         logger.info("opening Result for '%s'", report_name)
 
-        # Locate the report row. The list accumulates every report the user
-        # ever created, so we match the name exactly and pick the newest by
-        # report ID (IDs are monotonic). See _find_report_row for details.
-        row = self._find_report_row(report_name, timeout=20)
-
-        # Right-click the row to open the context menu.
-        try:
-            self._scroll_into_view(row)
-            ActionChains(self._d).context_click(row).perform()
-            logger.info("context-clicked report row")
-        except Exception as e:
-            logger.warning("context_click failed (%s); trying JS", e)
-            self._d.execute_script(
-                "var el = arguments[0];"
-                "var ev = document.createEvent('MouseEvents');"
-                "ev.initMouseEvent('contextmenu', true, true, window,"
-                "1, 0, 0, 0, 0, false, false, false, false, 2, null);"
-                "el.dispatchEvent(ev);",
-                row,
-            )
+        # The wass report list is rebuilt by jQuery/Kendo every time the
+        # status changes (and every time we click the refresh button in
+        # wait_for_completion). Any <tr> reference we hold goes stale within
+        # milliseconds of the rebuild, so ActionChains.context_click(row)
+        # throws StaleElementReferenceException -- and so does the JS fallback
+        # because it still passes the stale element as arguments[0].
+        #
+        # Fix: re-find the row inside a retry loop, and immediately
+        # right-click the FIRST <td> (the icon cell) of that freshly-found
+        # row via a single JS call -- no element argument is passed across
+        # the stale boundary, the JS re-resolves the row by name+max ID.
+        self._open_context_menu_for_report(report_name)
         self._short_pause(1)
 
         # Click "Result" in the context menu. Use the dedicated helper instead

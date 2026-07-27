@@ -155,7 +155,20 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 - 挑 ID **最大**的那条（ID 单调递增 = 最新生成的）
 - `download_result` 替换旧的 `row_xpaths` 循环
 
-### 6.5 其他坑
+### 6.5 ⚠️ 已修复的关键 bug：右键报告行 StaleElementReferenceException
+
+**症状**：报告状态刷新到 "Report successfully created" 后，`download_result` 找到了行（`picked id=32807`），但 `ActionChains.context_click(row)` 抛 `StaleElementReferenceException`，JS fallback 也抛同样的异常，程序终止。
+
+**根因**：wass 报表列表用 jQuery/Kendo 渲染。`wait_for_completion` 每轮点 refresh 按钮，最后状态变 "Report successfully created" 后表格 DOM 被重建——`_find_report_row` 拿到的 `<tr>` 引用在重建瞬间失效。`ActionChains.context_click(row)` 拿着失效的 element 去操作就抛 stale；fallback `execute_script(..., row)` 也把同一个失效 element 当 `arguments[0]` 传过去，同样抛 stale。
+
+**修复**（已合入）：
+1. `wait_for_completion` 检测到完成后多等 2s，让表格 DOM 重建完
+2. 新增 `_open_context_menu_for_report(name, max_attempts=5)`：retry loop 里 `_find_report_row` → 立刻 `context_click`，stale 就 sleep + 重新 find。还检查 `ul.context-menu-list` 是否真的弹出来了，没弹出就重试
+3. 新增 `_wait_for_context_menu(timeout)`：等 jQuery contextMenu `<ul>` 可见
+4. `download_result` 替换原来一次性 `context_click + JS fallback` 为调用新方法
+5. import 加 `StaleElementReferenceException`
+
+### 6.6 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
@@ -164,7 +177,7 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 - 整个文档可能渲染在 `<iframe>` 里，`_find_clickable` 先在 top document 找，找不到再遍历所有 iframe（一层深）
 - 右键行用 `ActionChains.context_click(row)`，失败回退到 JS dispatch contextmenu 事件
 
-### 6.5 部署注意事项
+### 6.7 部署注意事项
 
 - 必须是能访问 `wass.bmwgroup.net` 的 BMW 内网 Windows 机器
 - 首次跑要手动在浏览器完成 SSO 登录，`ensure_logged_in` 等 `login_timeout`（默认 120s）
