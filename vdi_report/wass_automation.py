@@ -589,6 +589,12 @@ class WassReportAutomator:
                 ),
                 message="login group row not found",
             )
+            # Scroll the Login row into view inside the popup's scroll area
+            # before clicking -- it may be below the fold.
+            self._d.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", login_row
+            )
+            time.sleep(0.4)
             # Prefer the Plus.png icon; fall back to the Login text cell.
             try:
                 plus = login_row.find_element(
@@ -606,6 +612,14 @@ class WassReportAutomator:
         # row's <div class='EmText EmTextClick'>. We click the EmCheckbox div
         # (the real toggle target) rather than the raw <input>, because
         # Matrix42 wires the onclick on the div, not the input.
+        #
+        # IMPORTANT: the picker popup has its own scrollable content area, and
+        # after expanding Login the Last Logon / Last User / ... rows live
+        # below the fold. We must scroll each row into view *inside the popup*
+        # before clicking, otherwise the click lands on whatever overlaps it.
+        # scrollIntoView({block:'center'}) on the row itself works because the
+        # browser walks up the scroll-container chain (including the popup's
+        # inner div) when bringing the element into view.
         for label in elements:
             try:
                 # Find the label div whose text matches (case-insensitive).
@@ -624,6 +638,15 @@ class WassReportAutomator:
                 cb_div = row.find_element(By.XPATH, ".//div[contains(@class,'EmCheckbox')]")
                 # Check current state via the input.
                 cb_input = cb_div.find_element(By.XPATH, ".//input[@type='checkbox']")
+                # Scroll the row into view inside the popup's scroll area.
+                # block:'center' puts it in the middle of the visible region
+                # so the checkbox is reliably clickable.
+                self._d.execute_script(
+                    "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
+                    row,
+                )
+                # Small pause to let the scroll settle.
+                time.sleep(0.4)
                 if not cb_input.is_selected():
                     self._d.execute_script("arguments[0].click();", cb_div)
                     logger.info("ticked: %s", label)
