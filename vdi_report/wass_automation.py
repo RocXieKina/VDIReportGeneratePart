@@ -483,6 +483,13 @@ class WassReportAutomator:
         # Step 3: click the "Import computer list" link to submit.
         self._click("import_computer_list_link")
 
+        # Step 3b: submitting a large batch pops up a confirmation dialog
+        # (e.g. "are you sure you want to import N computers?"). Just click
+        # through it -- "blindly confirm". Try the OK/Yes/Confirm buttons in
+        # the message box; if none appears within a short window, assume no
+        # confirmation was needed and continue.
+        self._dismiss_import_confirmation()
+
         # Step 4: wait for the right pane to reflect the imported computers.
         # No stable selector for the result list, so give the UI a moment.
         time.sleep(3)
@@ -493,6 +500,66 @@ class WassReportAutomator:
         # clicking it dropped them back to the report-name page). The correct
         # flow is: after the import link submits, the wizard stays on the
         # report-name page and we proceed directly to clicking Next.
+
+    def _dismiss_import_confirmation(self, timeout: float = 8) -> None:
+        """Dismiss the "are you sure?" confirmation that pops up after
+        submitting a large computer-name batch via Import computer list.
+
+        wass/Matrix42 confirmation dialogs are rendered as a MsgBox overlay
+        (see the host page's #MsgBox element) containing a single OK button
+        implemented as a Matrix42 Button widget (``<div id="Button...">`` with
+        text "OK" and an onclick of ``CloseMessageBox()``). Some confirmations
+        may use Yes/Confirm instead. We blindly click whichever confirm button
+        is visible. If nothing appears within *timeout* seconds, assume no
+        confirmation was required and return silently.
+        """
+        # Candidate button texts (case-insensitive). "OK" is by far the most
+        # common for Matrix42 message boxes.
+        labels = ("OK", "Yes", "Confirm", "Continue", "Accept")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for label in labels:
+                xpath = (
+                    f"//div[starts-with(@id,'Button')]"
+                    f"[.//span[@class='ui-button-text' and normalize-space()='{label}']]"
+                )
+                try:
+                    btns = self._d.find_elements(By.XPATH, xpath)
+                except Exception:
+                    btns = []
+                for btn in btns:
+                    try:
+                        if not btn.is_displayed():
+                            continue
+                        # Prefer buttons whose onclick closes a message box
+                        # (CloseMessageBox), but accept any visible one as a
+                        # last resort -- the user said "blindly confirm".
+                        btn_id = btn.get_attribute("id") or ""
+                        script = ""
+                        if btn_id:
+                            script = self._d.execute_script(
+                                "var b=document.getElementById(arguments[0]);"
+                                "if(!b)return'';var s=b.nextElementSibling;"
+                                "return s?s.textContent||'':'';",
+                                btn_id,
+                            ) or ""
+                        self._scroll_into_view(btn)
+                        try:
+                            btn.click()
+                        except Exception:
+                            self._d.execute_script("arguments[0].click();", btn)
+                        logger.info(
+                            "dismissed import confirmation (clicked '%s'%s)",
+                            label,
+                            " ~ CloseMessageBox" if "CloseMessageBox" in script else "",
+                        )
+                        # Give the UI a beat to settle after dismissing.
+                        self._short_pause(1)
+                        return
+                    except Exception:
+                        continue
+            time.sleep(0.5)
+        logger.debug("no import confirmation dialog appeared within %.0fs", timeout)
 
     def select_result_elements(self, elements: List[str]) -> None:
         """Open the output-element picker, expand Login, tick the requested
