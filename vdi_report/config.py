@@ -124,3 +124,80 @@ WASS_RESULT_ELEMENTS = [
 
 # Browser to use for automation: "edge" (default on Windows) or "chrome".
 WASS_BROWSER = "edge"
+
+# ===========================================================================
+# Final report: VDI + AD + lastlogon + Checkout PC List integration
+# ===========================================================================
+
+# Filename of the VDI+AD merged report produced by run.py (input to this step).
+VDI_AD_FINAL_FILENAME = "VDI_AD_final.xlsx"
+
+# Filename of the final integrated report.
+FINAL_REPORT_FILENAME = "VDI_Laptop_Asset_final.xlsx"
+
+# --- lastlogon report (downloaded by run_asset.py from wass) ---
+# The file lands in the asset YYYY-MM-DD folder alongside the Checkout PC List.
+# Name pattern: "VDI-laptop-lastlogin-YYYY-MM-DD*.xlsx" (chunk 0),
+#               "VDI-laptop-lastlogin-YYYY-MM-DD-02.xlsx" (chunk 1), ...
+#               "VDI-laptop-lastlogin-YYYY-MM-DD_merged.xlsx" (merged multi-chunk)
+LASTLOGON_FILE_PREFIX = "VDI-laptop-lastlogin-"
+LASTLOGON_MERGED_SUFFIX = "_merged"
+
+# Full header of the wass "Last Logon" result report.
+LASTLOGON_EXPECTED_COLUMNS = [
+    "HOSTNAME",
+    "MACHINEID",
+    "LOGIN - LAST LOGON",
+    "LOGIN - LAST USER",
+    "LOGIN - LAST USER (EMAIL)",
+    "LOGIN - LAST USER (ACCOUNT)",
+]
+
+# Columns kept from the lastlogon report.
+# "LOGIN - LAST USER (ACCOUNT)" is the join key to VDI's "Assigned Users" and
+# is dropped after the join (it duplicates Assigned Users).
+LASTLOGON_KEEP_COLUMNS = [
+    "HOSTNAME",
+    "MACHINEID",
+    "LOGIN - LAST LOGON",
+    "LOGIN - LAST USER",
+    "LOGIN - LAST USER (EMAIL)",
+    "LOGIN - LAST USER (ACCOUNT)",
+]
+
+# --- Checkout PC List columns pulled into the final report ---
+# "Name" is the join key to lastlogon's "HOSTNAME" and is dropped after the
+# join (it duplicates HOSTNAME).
+ASSET_RESPONSIBLE_COLUMNS = [
+    "Name",
+    "Responsible Q Number",
+    "Responsible Name",
+    "Responsible Company",
+    "Responsible Department",
+    "Responsible Email",
+]
+
+# --- Final report column order ---
+# Defines the exact column order of VDI_Laptop_Asset_final.xlsx.
+FINAL_REPORT_COLUMNS = [
+    # VDI side
+    "Id",
+    "IPv4 Address",
+    "Assigned Users",
+    # AD side
+    "DepartmentCode",
+    "Name",
+    "EmailAddress",
+    # lastlogon side
+    "HOSTNAME",
+    "MACHINEID",
+    "LOGIN - LAST LOGON",
+    "LOGIN - LAST USER",
+    "LOGIN - LAST USER (EMAIL)",
+    # asset side
+    "Responsible Q Number",
+    "Responsible Name",
+    "Responsible Company",
+    "Responsible Department",
+    "Responsible Email",
+]

@@ -4,25 +4,29 @@
 
 ## 1. 项目目标
 
-BMW 内部 IT 支持用的两条独立 Excel 报表自动化流水线，跑在 Windows 工作站上、读写 BMW 内网 UNC 共享（`\\china.bmw.corp\winfs\...`），只能在能访问该内网的 Windows 机器上运行，**不能在 dev sandbox 跑**。
+BMW 内部 IT 支持用的三条 Excel 报表自动化流水线，跑在 Windows 工作站上、读写 BMW 内网 UNC 共享（`\\china.bmw.corp\winfs\...`），只能在能访问该内网的 Windows 机器上运行，**不能在 dev sandbox 跑**。
 
 | 入口脚本 | 干什么 |
 |---|---|
 | `run.py` | 合并 VDI VMware 报表（Z3 + Z4）→ 与 AD Nameanddepartment 报表 join → 输出 `VDI_final.xlsx` + `VDI_AD_final.xlsx` |
 | `run_asset.py` | 读 Checkout PC List 资产报表 → 用 Selenium 自动驱动 `wass.bmwgroup.net` Inventory 向导，生成 VDI 笔记本 last-login 报表并下载 .xlsx |
+| `run_match.py` | 读 `VDI_AD_final.xlsx` + lastlogon + Checkout PC List，三层 join 出最终报告 `VDI_Laptop_Asset_final.xlsx`（既用 VDI 又用 laptop 的人 + 笔记本负责人信息） |
+| `run_all.py` | **统一入口**：按 A→B(可选)→C 顺序一键跑全部，B 智能跳过（见 §5.6） |
 
-两条流水线**互相独立**，可以单独跑。
+流水线 A、B 互相独立可单独跑。流水线 C 依赖 A 的输出 `VDI_AD_final.xlsx` 和 B 的输出 lastlogon 文件，作为最终整合步骤。`run_all.py` 把三者串起来作为日常一键入口。
 
 ## 2. 仓库结构
 
 ```
 VDIReportGeneratePart/
-├── run.py                       # VDI+AD 合并入口
-├── run_asset.py                 # asset->wass 入口
+├── run.py                       # 流水线 A：VDI+AD 合并入口
+├── run_asset.py                 # 流水线 B：asset->wass 入口
+├── run_match.py                 # 流水线 C：最终整合入口（VDI+AD + lastlogon + Checkout PC List）
+├── run_all.py                   # 统一入口：A→B(可选)→C 一键跑
 ├── requirements.txt
 ├── .gitignore                   # *.xlsx 已忽略，输出不入库
 └── vdi_report/
-    ├── __init__.py              # 暴露 VDIReportAnalyzer
+    ├── __init__.py              # 暴露 VDIReportAnalyzer、FinalReportBuilder
     ├── config.py                # 所有路径/列名/常量（单一真相源）
     ├── analyzer.py              # VDIReportAnalyzer：Step1 merge + Step2 join
     ├── vdi_merger.py            # Step1：Z3+Z4 合并
@@ -30,7 +34,8 @@ VDIReportGeneratePart/
     ├── paths.py                 # 共享上找最新 VDI/AD 文件夹
     ├── asset_pipeline.py        # asset->wass 编排
     ├── asset_reader.py          # 读 Checkout PC List，分块
-    └── wass_automation.py       # Selenium 驱动 wass 向导（最复杂，bug 多在这里）
+    ├── wass_automation.py       # Selenium 驱动 wass 向导（最复杂，bug 多在这里）
+    └── final_report.py          # 流水线 C：FinalReportBuilder 三层 join
 ```
 
 ## 3. config.py 关键常量
@@ -47,6 +52,14 @@ VDIReportGeneratePart/
 | `WASS_BROWSER` | `"edge"`（默认，Windows 自带） |
 | `WASS_REPORT_TIMEOUT_SECONDS` | `1800` |
 | `Z3_PREFIX` / `Z4_PREFIX` | `"Z3"` / `"Z4"` |
+| `VDI_AD_FINAL_FILENAME` | `"VDI_AD_final.xlsx"`（流水线 C 的输入） |
+| `FINAL_REPORT_FILENAME` | `"VDI_Laptop_Asset_final.xlsx"`（流水线 C 的输出） |
+| `LASTLOGON_FILE_PREFIX` | `"VDI-laptop-lastlogin-"`（流水线 B 下载文件的命名前缀） |
+| `LASTLOGON_MERGED_SUFFIX` | `"_merged"`（多块合并文件后缀，自动发现时优先选它） |
+| `LASTLOGON_EXPECTED_COLUMNS` | wass last-logon 报表的 6 列表头 |
+| `LASTLOGON_KEEP_COLUMNS` | 流水线 C 从 lastlogon 保留的列（ACCOUNT 是 join key，join 后丢弃） |
+| `ASSET_RESPONSIBLE_COLUMNS` | 流水线 C 从 Checkout PC List 取的 `Name` + 5 个 Responsible 字段 |
+| `FINAL_REPORT_COLUMNS` | 最终报告的 16 列固定顺序（VDI 3 + AD 3 + lastlogon 5 + asset 5） |
 
 所有路径调整、列名变更、元素名变更都在 `config.py` 改，**其他文件不需要动**。
 
@@ -94,6 +107,131 @@ CLI：`python run.py [-v] [--vdi-root X] [--ad-root X] [--output-dir X] [--no-ex
 CLI：`python run_asset.py [-v] [--browser edge|chrome] [--headless] [--chunk-size N] [--dry-run] [--asset-root X] [--download-dir X]`
 
 `--dry-run` 只做读+分块，不开浏览器，用来验证资产文件解析。
+
+## 5.5 流水线 C：最终整合（`run_match.py`）
+
+把流水线 A 的输出和流水线 B 的输出（lastlogon）加上 Checkout PC List 三层 join，得到最终报告 `VDI_Laptop_Asset_final.xlsx`——既用 VDI 又用 laptop 的人，加上笔记本负责人信息。
+
+### 输入
+
+| 输入 | 默认发现方式 | 可显式指定 |
+|---|---|---|
+| `VDI_AD_final.xlsx`（流水线 A 输出） | `<output-dir>/VDI_AD_final.xlsx` | `--vdi-ad-file` |
+| lastlogon `.xlsx`（流水线 B 输出） | 最新资产 `YYYY-MM-DD` 文件夹里 `VDI-laptop-lastlogin-*.xlsx`（优先 `_merged.xlsx`） | `--lastlogon-file` |
+| Checkout PC List `.xlsx` | 与 lastlogon 同一个 `YYYY-MM-DD` 文件夹里的 `Checkout PC List *.xlsx` | `--checkout-file` |
+
+### 三层 join
+
+```
+load_vdi_ad_report(VDI_AD_final.xlsx)
+   → 读 [Id, IPv4 Address, Assigned Users, DepartmentCode, Name, EmailAddress]
+
+load_lastlogon(lastlogon.xlsx)
+   → 丢弃 LOGIN - LAST USER (ACCOUNT) 为空的行（用户要求："空的就忽略无所谓"）
+   → 保留 [HOSTNAME, MACHINEID, LOGIN - LAST LOGON, LOGIN - LAST USER,
+           LOGIN - LAST USER (EMAIL), LOGIN - LAST USER (ACCOUNT)]
+   → 去掉完全重复行（但不去重账号——一个人有多台 laptop 时保留多行）
+
+join_vdi_with_lastlogon（默认 INNER，--keep-all-vdi 切 LEFT）
+   → key: VDI.Assigned Users ≈ lastlogon.LOGIN - LAST USER (ACCOUNT)
+   → 大小写不敏感、trim、空值→NaN
+   → join 后丢弃 LOGIN - LAST USER (ACCOUNT)（与 Assigned Users 重复）
+   → 默认 INNER：只保留既用 VDI 又用 laptop 的人
+
+load_checkout_responsible(Checkout PC List)
+   → 保留 [Name, Responsible Q Number, Responsible Name,
+           Responsible Company, Responsible Department, Responsible Email]
+   → 按 Name 去重（大小写不敏感），避免 join 扇出
+
+join_with_checkout（LEFT join）
+   → key: 上一步结果的 HOSTNAME ≈ Checkout PC List.Name
+   → join 后丢弃 Name（与 HOSTNAME 重复）
+   → 找不到的 laptop：5 个 Responsible 字段留空 NaN
+
+_order_columns
+   → 按 FINAL_REPORT_COLUMNS 重排（缺失的列补空列）
+   → 写 VDI_Laptop_Asset_final.xlsx
+```
+
+### 最终报告 16 列固定顺序
+
+```
+VDI 侧 (3):   Id | IPv4 Address | Assigned Users
+AD 侧 (3):    DepartmentCode | Name | EmailAddress
+lastlogon (5): HOSTNAME | MACHINEID | LOGIN - LAST LOGON | LOGIN - LAST USER | LOGIN - LAST USER (EMAIL)
+asset 侧 (5):  Responsible Q Number | Responsible Name | Responsible Company | Responsible Department | Responsible Email
+```
+
+注意：AD 的 `Name` 是人名，Checkout PC List 的 `Name` 是计算机名——两者 join 前会被丢弃（前者保留、后者与 HOSTNAME 重复），不会冲突。
+
+### 多 laptop 场景
+
+lastlogon 里同一个人可能有多台 laptop（多行同 `LOGIN - LAST USER (ACCOUNT)`），默认 INNER join 会自然 fan out——一个 VDI 用户对应 N 行最终报告（N 台 laptop）。这是预期行为，**不去重账号**，仅去完全重复行。
+
+CLI：`python run_match.py [-v] [--vdi-ad-file X] [--lastlogon-file X] [--checkout-file X] [--asset-root X] [--output-dir X] [--keep-all-vdi]`
+
+`--keep-all-vdi`：切换为 LEFT join，保留所有 VDI 用户（无 laptop 匹配的行 lastlogon/asset 字段留空）。默认 INNER join 只出"既用 VDI 又用 laptop"的人。
+
+## 5.6 统一入口（`run_all.py`）
+
+把 A→B→C 串成一条命令，作为日常一键入口。每个阶段独立 try/except，失败不影响其他阶段；末尾打印汇总表。
+
+### B 的智能跳过（默认行为）
+
+wass Selenium 自动化需要交互式 SSO 登录 + ~30 分钟跑批，不能像 A/C 那样无人值守。因此 `run_all.py` **默认智能跳过 B**：
+
+```
+                    ┌─ 已存在 today 的 lastlogon 文件？─┐
+                    │                                   │
+                   YES                                  NO
+                    │                                   │
+            跳过 B（reason:                         运行 B（reason:
+            "lastlogon already exists"）            "no lastlogon file found for today"）
+```
+
+覆盖此行为：
+
+| 标志 | 效果 |
+|---|---|
+| （默认） | 检测到 today 的 lastlogon 文件就跳过 B；找不到才跑 B |
+| `--with-asset` | 强制跑 B（即使 lastlogon 已存在，用于重跑当日 wass） |
+| `--skip-asset` | 永不跑 B（用现有 lastlogon 文件） |
+
+### 关键设计：selenium 懒加载
+
+`AssetWassPipeline` 在 `run_pipeline_b` 里**懒加载**（`from vdi_report.asset_pipeline import AssetWassPipeline`），而不是模块顶部 import。这样 `--skip-asset` 路径（日常默认）在没装 selenium 的机器上也能跑——只需 `pandas` + `openpyxl` 即可完成 A→C。
+
+### 退出码
+
+- A 或 C 失败 → exit 1（核心阶段）
+- B 失败 → 不影响退出码（可选阶段，B 失败时 C 仍可用旧 lastlogon 跑）
+
+### CLI
+
+```bash
+python run_all.py                                # 日常默认：A→(B智能跳过)→C
+python run_all.py -v                             # 详细日志
+python run_all.py --with-asset                   # 强制跑 B（重跑当日 wass）
+python run_all.py --skip-asset                   # 永不跑 B
+python run_all.py --skip-a --skip-asset          # 只跑 C（A/B 都已跑过）
+python run_all.py --keep-all-vdi                 # C 用 LEFT join
+python run_all.py --browser chrome --headless    # 透传给 B
+```
+
+### 汇总输出
+
+末尾打印：
+```
+============================================================
+Pipeline summary
+============================================================
+  A: VDI+AD merge           ok
+  B: wass last-login        skipped
+  C: final integration      ok
+
+Final report: <output-dir>/VDI_Laptop_Asset_final.xlsx
+============================================================
+```
 
 ## 6. wass_automation.py 关键设计点
 
@@ -272,6 +410,12 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 | 报告一直 running 不结束 | `WASS_REPORT_TIMEOUT_SECONDS` / wass 后端慢，正常 |
 | 报告 1 秒就 "successfully created" 但实际没跑完 | 同名报告状态读错 → `_read_status` 已改按最新 ID 行的 icon 判断（6.6 节） |
 | 右键行抛 StaleElementReferenceException | 表格 DOM 重建导致 row 引用失效 → `_open_context_menu_for_report` retry（6.5 节） |
+| `VDI+AD report not found at ...` | `run_match.py` 找不到 `VDI_AD_final.xlsx` → 先跑 `run.py`，或用 `--vdi-ad-file` 显式指定 |
+| `No 'VDI-laptop-lastlogin-*.xlsx' found` | `run_match.py` 在最新资产文件夹里找不到 lastlogon → 先跑 `run_asset.py`，或用 `--lastlogon-file` 显式指定 |
+| `lastlogon file has no 'LOGIN - LAST USER (ACCOUNT)' column` | wass 报表表头变了 → `config.LASTLOGON_EXPECTED_COLUMNS` |
+| 最终报告 Responsible 字段全空 | Checkout PC List 没找到 / `HOSTNAME` 与 `Name` 大小写或格式不一致 → 检查 `_clean_key` 的 trim+upper 归一化 |
+| 最终报告列缺失或顺序错乱 | `config.FINAL_REPORT_COLUMNS` |
+| 想保留没匹配 laptop 的 VDI 用户 | `run_match.py --keep-all-vdi`（切 LEFT join） |
 
 ## 9. 开发约定
 
