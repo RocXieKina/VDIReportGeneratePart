@@ -172,16 +172,14 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 
 **症状**：`wait_for_completion` 1 秒内就报 "Report successfully created" 然后立刻去下载——但新报告可能还在跑。用户确认 wass 列表里有多条同名报告（重跑产生）。
 
-**根因**：旧 `_read_status` 用 `//*[contains(.,'报告名')]//*[contains(.,'Report successfully created')]` 子串匹配。列表里有旧的同名报告（早已完成），XPath 匹配到旧报告的容器，读到旧报告的 "successfully created" 状态，1 秒就返回。实际新报告还在生成中——状态和时间不匹配。
+**根因**（两层）：
+1. 旧 `_read_status` 用 `//*[contains(.,'报告名')]//*[contains(.,'Report successfully created')]` 子串匹配，匹配到旧报告容器
+2. 即使按 ID 找最新行，icon fallback 还有"行内文本含 successfully created"判断——`row.text` 会包含后代所有可见文本，可能吸入邻近元素的 "successfully created" 提示，导致新报告行也被误判完成
 
-**修复**（已合入）：重写 `_read_status` + 新增 `_read_row_status`：
-- 找最新 ID 的同名报告行（ID 单调递增 = 新报告）
-- 读**那一行**的 icon `<div class="EmIcon">` 的 `background-image` URL：
-  - 含 `Report_Success` / `success` → `STATUS_DONE`
-  - 含 `running` / `process` / `wait` → `STATUS_RUNNING`
-  - **未知 icon → `STATUS_RUNNING`**（安全默认，避免把半成品误判为完成）
-- fallback：行内文本 / 行 title/alt 属性里的状态文本
-- 只有新报告自己的 icon 翻成 Success 才返回 DONE，绝不继承旧报告的状态
+**修复**（已合入）：
+1. `wait_for_completion` 提交前先记录当前最大 ID（`_max_report_id`），之后只信任 ID **严格大于**该值的新行——彻底忽略提交前已存在的同名报告
+2. `_read_status` 加 `min_id` 参数，过滤掉旧报告行
+3. `_read_row_status` 只信任 icon：`Report_Success`/`success` → DONE，其他 icon / 无 icon → RUNNING。**去掉所有文本 fallback**，避免吸入邻近元素的状态文本
 
 ### 6.7 其他坑
 

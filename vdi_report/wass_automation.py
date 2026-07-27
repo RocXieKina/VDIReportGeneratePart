@@ -1046,15 +1046,28 @@ class WassReportAutomator:
         timeout: int = config.WASS_REPORT_TIMEOUT_SECONDS,
         poll_interval: int = config.WASS_POLL_INTERVAL_SECONDS,
     ) -> None:
-        """Click the top-right refresh button until the report is done."""
+        """Click the top-right refresh button until the report is done.
+
+        We record the highest report ID present at submit time, then only
+        trust status readings from rows whose ID is strictly greater than
+        that -- this is the report we just launched. Older same-named reports
+        (re-runs from earlier attempts) are ignored even if they share the
+        exact name, so we never inherit a stale "successfully created"
+        status from a previous run.
+        """
         logger.info(
             "waiting for report '%s' to finish (timeout=%ds)", report_name, timeout
+        )
+        prev_max_id = self._max_report_id(report_name)
+        logger.info(
+            "report IDs present at submit: max=%s (new report must have ID > this)",
+            prev_max_id if prev_max_id is not None else "(no matching rows yet)",
         )
         deadline = time.time() + timeout
         last_status = None
         while time.time() < deadline:
             self._refresh()
-            status = self._read_status(report_name)
+            status = self._read_status(report_name, min_id=prev_max_id)
             if status != last_status:
                 logger.info("status: %s", status or "(unknown)")
                 last_status = status
@@ -1073,6 +1086,44 @@ class WassReportAutomator:
             f"(last status: {last_status})"
         )
 
+    def _max_report_id(self, report_name: str):
+        """Return the highest report ID among rows named *report_name*, or
+        ``None`` if no matching row exists yet."""
+        try:
+            rows = self._d.find_elements(
+                By.XPATH, "//tr[@cr='true' and @cm]"
+            )
+            best = None
+            for r in rows:
+                try:
+                    tds = r.find_elements(By.TAG_NAME, "td")
+                    if len(tds) < 3:
+                        continue
+                    if not any(
+                        (td.text or "").strip() == report_name for td in tds
+                    ):
+                        continue
+                    cp = r.get_attribute("cp") or ""
+                    rid = -1
+                    parts = cp.split("|")
+                    if len(parts) >= 2:
+                        try:
+                            rid = int(parts[1].strip())
+                        except ValueError:
+                            pass
+                    if rid < 0:
+                        try:
+                            rid = int((tds[1].text or "").strip())
+                        except ValueError:
+                            rid = -1
+                    if rid >= 0 and (best is None or rid > best):
+                        best = rid
+                except Exception:
+                    continue
+            return best
+        except Exception:
+            return None
+
     def _refresh(self) -> None:
         """Click the small top-right refresh button; fall back to F5."""
         try:
@@ -1083,7 +1134,7 @@ class WassReportAutomator:
             except Exception:
                 pass
 
-    def _read_status(self, report_name: str) -> str:
+    def _read_status(self, report_name: str, min_id: Optional[int] = None) -> str:
         """Read the status of the *newest* report named *report_name*.
 
         The report list accumulates every report the user ever created, so a
@@ -1091,18 +1142,20 @@ class WassReportAutomator:
         same-named report that is already 'successfully created' -- making
         wait_for_completion return instantly while the report we just
         launched is still running. We instead locate the newest matching row
-        by report ID (monotonic) and read *that* row's status.
+        by report ID (monotonic) and read *that* row's icon.
 
-        Status signal, in priority order:
-          1. The row's icon ``<div class="EmIcon">`` ``background-image`` URL:
-             ``Report_Success.png`` -> :data:`STATUS_DONE`; anything else
-             (Running/Processing/etc.) -> :data:`STATUS_RUNNING`. This is the
-             safest signal -- only treat the report as done when its own icon
-             flipped to Success, never inherit an older report's status.
-          2. Any text inside the row matching STATUS_RUNNING / STATUS_DONE.
-          3. The row's title/alt attributes.
+        If *min_id* is given, only rows with ID strictly greater than
+        *min_id* are considered -- this lets wait_for_completion ignore every
+        same-named report that already existed at submit time, so a freshly
+        submitted run is never mistaken for an older finished one.
 
-        Returns "" if no matching row is found (e.g. the row has not been
+        Status signal: only the row's own ``<div class="EmIcon">``
+        ``background-image`` URL containing ``Report_Success`` / ``success``
+        counts as :data:`STATUS_DONE`. Any other icon (or no icon) is treated
+        as :data:`STATUS_RUNNING` -- we never inherit a stale "done" status
+        from a neighbouring element's text. See :meth:`_read_row_status`.
+
+        Returns "" if no matching row is found (e.g. the new row has not been
         rendered yet right after the wizard submitted).
         """
         try:
@@ -1133,6 +1186,9 @@ class WassReportAutomator:
                             rid = int((tds[1].text or "").strip())
                         except ValueError:
                             rid = -1
+                    # Ignore rows that already existed at submit time.
+                    if min_id is not None and rid >= 0 and rid <= min_id:
+                        continue
                     if rid > best_id:
                         best_id = rid
                         best_row = r
@@ -1145,52 +1201,36 @@ class WassReportAutomator:
             return ""
 
     def _read_row_status(self, row) -> str:
-        """Read the status signal from a single report ``<tr>``."""
+        """Read the status signal from a single report ``<tr>``.
+
+        Only the row's own ``<div class="EmIcon">`` background-image URL is
+        trusted as a DONE signal -- everything else (row text, parent text)
+        is treated as still RUNNING. This is intentional: wass shows status
+        purely via the icon, and the row's computed text can inadvertently
+        include stray "successfully created" strings from neighbouring
+        elements / toast notifications, which previously caused
+        wait_for_completion to return ~1 second after submit while the
+        report was still generating.
+        """
         try:
-            # 1. Icon background-image URL -- the most reliable signal.
-            #    Report_Success.png = done; anything else = still running.
-            #    We deliberately treat unknown icons as RUNNING so a
-            #    half-generated report is never mistaken for finished.
             icons = row.find_elements(By.CSS_SELECTOR, "div.EmIcon")
-            saw_icon = False
             for icon in icons:
                 try:
                     style = icon.get_attribute("style") or ""
                 except Exception:
                     continue
-                saw_icon = True
                 low = style.lower()
+                # Only the explicit Success icon means done.
                 if "report_success" in low or "success" in low:
                     return STATUS_DONE
+                # Running / processing / waiting icons.
                 if "running" in low or "process" in low or "wait" in low:
                     return STATUS_RUNNING
-                # Unknown icon -- fall through to text checks below.
-            # 2. Status text inside the row (some layouts put it in a cell).
-            try:
-                txt = (row.text or "").strip()
-                low_txt = txt.lower()
-                if STATUS_DONE.lower() in low_txt:
-                    return STATUS_DONE
-                if STATUS_RUNNING.lower() in low_txt:
-                    return STATUS_RUNNING
-            except Exception:
-                pass
-            # 3. Row title/alt attributes.
-            for attr in ("title", "alt"):
-                try:
-                    v = row.get_attribute(attr) or ""
-                    low_v = v.lower()
-                    if STATUS_DONE.lower() in low_v:
-                        return STATUS_DONE
-                    if STATUS_RUNNING.lower() in low_v:
-                        return STATUS_RUNNING
-                except Exception:
-                    continue
-            # 4. We have a row with an icon but no recognizable status. Assume
-            #    still running -- safer than assuming done.
-            if saw_icon:
+                # Any other icon (e.g. New, Queued) -- still in flight.
                 return STATUS_RUNNING
-            return ""
+            # No icon at all -- row may be mid-render. Treat as running so we
+            # keep polling instead of falsely returning done.
+            return STATUS_RUNNING
         except Exception:
             return ""
 
