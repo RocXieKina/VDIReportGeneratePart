@@ -85,23 +85,28 @@ def _ci(label: str) -> str:
 # strings if the real wass UI uses different wording.
 # ---------------------------------------------------------------------------
 DEFAULT_LOCATORS: Dict[str, Any] = {
-    # Top-level navigation: prefer the stable Matrix42 nav id, fall back to text.
-    "inventory_tab": (
-        By.CSS_SELECTOR,
-        "#MainNaviBottom_2, #MainNaviBottom_2 span",
-    ),
-    # Wizard buttons: use _ci() so each label matches across Matrix42 button
-    # divs (id^='Button'), Kendo buttons (.k-button) and plain text, all
-    # case-insensitively.
+    # Top-level navigation: Matrix42 nav items have stable ids.
+    # MainNaviBottom_2 = Inventory, MainNaviBottom_1 = Home, etc.
+    "inventory_tab": (By.CSS_SELECTOR, "#MainNaviBottom_2, #MainNaviBottom_2 span"),
     "create_report": (By.XPATH, _ci("create report")),
     "new_report": (By.XPATH, _ci("new report")),
-    # Report name input -- any visible text input near the top of the wizard.
-    "report_name_input": (By.CSS_SELECTOR, "input[type='text']"),
-    # Import step
-    "import_button": (By.XPATH, _ci("import")),
-    "import_computer_list_link": (By.XPATH, _ci("import computer list")),
-    "import_textarea": (By.CSS_SELECTOR, "textarea"),
-    # Wizard navigation
+    # Report name input -- Matrix42 uses <input id="Name">.
+    "report_name_input": (By.CSS_SELECTOR, "#Name, input#Name"),
+    # Import step. The "Import" icon buttons are Matrix42 IconButton widgets
+    # with stable ids and no visible text (just an <img> + tooltip). The user
+    # described "the first button on the right" -> that is #ImportList, which
+    # loads Host_Import.aspx into #Level3_Content.
+    "import_button": (By.CSS_SELECTOR, "#ImportList"),
+    # The "Import computer list" link is a real <a class="EmTextLink"> with
+    # that text, plus an onclick that posts to Host_Import.aspx?mode=AddList.
+    "import_computer_list_link": (
+        By.CSS_SELECTOR,
+        "a.EmTextLink[href*='Host_Import']",
+    ),
+    # The textarea where the computer name list is pasted.
+    "import_textarea": (By.CSS_SELECTOR, "#ListResult, textarea#ListResult"),
+    # Wizard navigation -- these are Matrix42 Button widgets (<div id="Button...">
+    # with text inside). _ci() matches the text case-insensitively.
     "ok_button": (By.XPATH, _ci("ok")),
     "next_button": (By.XPATH, _ci("next")),
     "result_elements_button": (By.XPATH, _ci("result element")),
@@ -349,26 +354,36 @@ class WassReportAutomator:
         logger.info("report name set: %s", report_name)
 
     def import_computer_list(self, names: List[str]) -> None:
-        """Open the Import picker, paste *names*, trigger the import, confirm."""
-        self._click("import_button")
-        self._short_pause()
-        self._click("import_computer_list_link")
-        self._short_pause()
+        """Open the Import picker, paste *names*, trigger the import, confirm.
 
+        wass/Matrix42 flow (per inspected HTML):
+          1. Click ``#ImportList`` icon button -> loads Host_Import.aspx into
+             ``#Level3_Content`` (the right pane with the textarea + link).
+          2. Wait for ``#ListResult`` textarea to appear, paste names into it.
+          3. Click the ``a.EmTextLink[href*='Host_Import']`` link ("Import
+             computer list") to actually submit the pasted list.
+          4. Wait briefly for the right pane to list the imported computers,
+             then click OK.
+        """
+        # Step 1: open the import picker.
+        self._click("import_button")
+        self._short_pause(2)
+
+        # Step 2: wait for the textarea and paste.
         by, val = self._loc("import_textarea")
         textarea = self._wait().until(
             EC.presence_of_element_located((by, val)),
-            message="import textarea not found",
+            message="import textarea (#ListResult) not found",
         )
         textarea.clear()
         textarea.send_keys("\n".join(names))
-        logger.info("pasted %d computer names into import textarea", len(names))
+        logger.info("pasted %d computer names into #ListResult", len(names))
 
-        # Click the link again to actually import what was pasted.
+        # Step 3: click the "Import computer list" link to submit.
         self._click("import_computer_list_link")
 
-        # Wait for the right pane to reflect the imported computers. There is
-        # no stable selector, so we just give the UI a moment to render.
+        # Step 4: wait for the right pane to reflect the imported computers.
+        # No stable selector for the result list, so give the UI a moment.
         time.sleep(3)
         logger.info("imported computer list submitted")
 
