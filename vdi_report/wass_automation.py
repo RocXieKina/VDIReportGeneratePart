@@ -357,6 +357,7 @@ class WassReportAutomator:
         """
         deadline = time.time() + timeout
         last_err = None
+        last_candidate_info = []
         while time.time() < deadline:
             # All Matrix42 Button widgets: <div id="Button..."> containing a
             # <span class="ui-button-text"> with the label.
@@ -365,36 +366,59 @@ class WassReportAutomator:
                 f"[.//span[@class='ui-button-text' and normalize-space()='{label}']]"
             )
             candidates = self._d.find_elements(By.XPATH, xpath)
+            last_candidate_info = []
             for btn in candidates:
                 try:
                     btn_id = btn.get_attribute("id") or ""
                     if not btn_id:
                         continue
-                    # The onclick handler is in a sibling <script> that calls
-                    # EmControls.Events.SetOnClick("btn_id", {...}).
+                    # The onclick handler is registered via
+                    # EmControls.Events.SetOnClick("btn_id", {...OnClick...})
+                    # in a <script> tag. The script is usually a sibling of the
+                    # button div, but the exact position varies (sometimes it's
+                    # the parent's sibling, or further down). Search the whole
+                    # document for any <script> mentioning this btn_id and read
+                    # its text -- that's the most robust source.
                     script = self._d.execute_script(
-                        "var b = document.getElementById(arguments[0]);"
-                        "if (!b) return '';"
-                        "var s = b.nextElementSibling;"
-                        "return s ? s.textContent || '' : '';",
+                        "var id = arguments[0];"
+                        "var scripts = document.getElementsByTagName('script');"
+                        "for (var i = 0; i < scripts.length; i++) {"
+                        "  var t = scripts[i].textContent || '';"
+                        "  if (t.indexOf(id) !== -1) return t;"
+                        "}"
+                        "return '';",
                         btn_id,
                     ) or ""
-                    if onclick_contains in script and btn.is_displayed():
+                    visible = btn.is_displayed()
+                    last_candidate_info.append(
+                        f"id={btn_id} visible={visible} script_has_target="
+                        f"{onclick_contains in script}"
+                    )
+                    if onclick_contains in script and visible:
                         self._scroll_into_view(btn)
                         try:
                             btn.click()
                         except Exception:
                             self._d.execute_script("arguments[0].click();", btn)
-                        logger.info("clicked: %s (label='%s', onclick~'%s')",
-                                    name, label, onclick_contains)
+                        logger.info(
+                            "clicked: %s (label='%s', onclick~'%s')",
+                            name, label, onclick_contains,
+                        )
                         return
                 except Exception as e:
                     last_err = e
                     continue
             time.sleep(0.5)
+        # Diagnostic: log what we found so the user/AI can adjust the locator.
+        logger.error(
+            "button '%s' not found. Candidates seen (label='%s', target='%s'): %s",
+            name, label, onclick_contains,
+            last_candidate_info or "(none)",
+        )
         raise TimeoutException(
             f"button '{name}' (label='{label}', onclick~'{onclick_contains}') "
-            f"not found; last error: {last_err}"
+            f"not found; candidates: {last_candidate_info or '(none)'}; "
+            f"last error: {last_err}"
         )
 
     # ------------------------------------------------------------------ #
@@ -695,9 +719,19 @@ class WassReportAutomator:
                 logger.warning("could not tick '%s': %s", label, e)
 
         # Close the picker with the OK button whose onclick closes Level3.
-        self._click_button_by_onclick(
-            "result_elements_ok_button", "OK", "ClosePopup('Level3')"
-        )
+        # If we can't find that exact button (e.g. the script registration
+        # differs slightly), fall back to clicking any visible OK button --
+        # at this point the only OK on screen should be the picker's.
+        try:
+            self._click_button_by_onclick(
+                "result_elements_ok_button", "OK", "ClosePopup('Level3')"
+            )
+        except Exception as e:
+            logger.warning(
+                "could not find picker OK via ClosePopup('Level3') (%s); "
+                "trying any visible OK button", e
+            )
+            self._click("ok_button", timeout=10)
 
     def finish_wizard(self) -> None:
         """Click Step2 Next (-> Step3), then the generate-report OK.
@@ -706,14 +740,31 @@ class WassReportAutomator:
         wizard, so they are disambiguated by their onclick handlers:
           - Step2 Next: onclick contains 'Inv_Rep_Step3.aspx'
           - Generate-report OK: onclick contains 'Save_Report.aspx'
+
+        Falls back to clicking any visible Next/OK if the onclick-specific
+        match fails (at each step only the relevant button is on screen).
         """
-        self._click_button_by_onclick(
-            "next_step2_button", "Next", "Inv_Rep_Step3.aspx"
-        )
+        try:
+            self._click_button_by_onclick(
+                "next_step2_button", "Next", "Inv_Rep_Step3.aspx"
+            )
+        except Exception as e:
+            logger.warning(
+                "could not find Step2 Next via Inv_Rep_Step3.aspx (%s); "
+                "trying any visible Next button", e
+            )
+            self._click("next_button", timeout=10)
         self._short_pause(2)
-        self._click_button_by_onclick(
-            "generate_report_ok_button", "OK", "Save_Report.aspx"
-        )
+        try:
+            self._click_button_by_onclick(
+                "generate_report_ok_button", "OK", "Save_Report.aspx"
+            )
+        except Exception as e:
+            logger.warning(
+                "could not find generate OK via Save_Report.aspx (%s); "
+                "trying any visible OK button", e
+            )
+            self._click("ok_button", timeout=10)
 
     def wait_for_completion(
         self,
