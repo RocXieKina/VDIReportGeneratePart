@@ -689,6 +689,92 @@ class WassReportAutomator:
             time.sleep(0.2)
         return False
 
+    def _click_excel_download(self, timeout: float = 15) -> None:
+        """Click the "Excel Download" entry inside the Result popup.
+
+        From inspected HTML, the entry is a table row whose cells are
+        ``<td id="<guid>" class="EmText" style="cursor:pointer;">`` -- one
+        cell holds the icon (``<img id="Icon_Result">``), the other holds the
+        label ``<div class="EmText">Excel Download</div>``. Matrix42 binds the
+        onclick to **both ``<td>`` cells** via
+        ``EmControls.Events.SetOnClickMulti(new Array(td1_id, td2_id), {...})``.
+
+        Two snags with the normal click:
+          1. ``_click`` uses ``EC.element_to_be_clickable`` on whatever the
+             locator returns; if it returns the inner ``<div class="EmText">``
+             the click lands on the div, but Matrix42's handler is registered
+             on the ``<td>`` and may check ``event.target`` -- the click never
+             fires the LoadContent navigation.
+          2. The handler is in a ``SetOnClickMulti`` JSON string with
+             ``\\u0027`` escapes (single quotes), so any onclick-text match
+             needs :func:`_decode_js_unicode` first.
+
+        We locate the ``<td>`` that contains the "Excel Download" label,
+        scroll it into view, and JS-click it. JS ``.click()`` on the ``<td>``
+        reliably triggers Matrix42's delegated handler. If that doesn't fire
+        the navigation, we fall back to calling the LoadContent URL directly
+        via execute_script -- the URL (``Inv_Rep_Status_Download.aspx?id=...``)
+        is parsed out of the script with ``_decode_js_unicode`` applied first.
+        """
+        deadline = time.time() + timeout
+        last_err = None
+        while time.time() < deadline:
+            # The <td> that contains the Excel Download label <div>.
+            tds = self._d.find_elements(
+                By.XPATH,
+                "//td[contains(@class,'EmText')]"
+                "[.//div[contains(@class,'EmText')]"
+                "[normalize-space()='Excel Download']]"
+                " | //td[normalize-space()='Excel Download']",
+            )
+            for td in tds:
+                try:
+                    if not td.is_displayed():
+                        continue
+                    self._scroll_into_view(td)
+                    # Try normal click first.
+                    try:
+                        td.click()
+                    except Exception:
+                        self._d.execute_script("arguments[0].click();", td)
+                    logger.info("clicked: excel_download (td click)")
+                    return
+                except Exception as e:
+                    last_err = e
+                    continue
+            time.sleep(0.5)
+        # Last-resort: parse the LoadContent URL out of the page's <script>
+        # tags and navigate to it directly. This bypasses Matrix42's event
+        # binding entirely.
+        try:
+            url = self._d.execute_script(
+                "var scripts = document.getElementsByTagName('script');"
+                "for (var i = 0; i < scripts.length; i++) {"
+                "  var t = scripts[i].textContent || '';"
+                "  var m = t.match(/Inv_Rep_Status_Download\\.aspx\\?id=\\d+/);"
+                "  if (m) return m[0];"
+                "}"
+                "return '';"
+            )
+            if url:
+                logger.info(
+                    "excel_download: invoking LoadContent directly for %s", url
+                )
+                self._d.execute_script(
+                    "if (typeof LoadContent === 'function') {"
+                    "  LoadContent('Level2_Form', 'StatusContentResult',"
+                    "  arguments[0]);"
+                    "}",
+                    url,
+                )
+                return
+        except Exception as e:
+            last_err = e
+        raise TimeoutException(
+            f"could not click Excel Download within {timeout}s; "
+            f"last error: {last_err}"
+        )
+
     # ------------------------------------------------------------------ #
     # High-level wizard steps
     # ------------------------------------------------------------------ #
@@ -1281,8 +1367,19 @@ class WassReportAutomator:
             self._click("result_menu_item", timeout=10)
         self._short_pause(2)
 
-        # Click "Excel Download".
-        self._click("excel_download_button", timeout=15)
+        # Click "Excel Download". Matrix42 binds the onclick to the <td>
+        # (id="cef5e254-...") via EmControls.Events.SetOnClickMulti, NOT to
+        # the inner <div class="EmText">. A plain Selenium click on the <div>
+        # often does not fire the handler (Matrix42 likely checks e.target),
+        # so we explicitly target the <td> and JS-click it to be safe.
+        try:
+            self._click_excel_download(timeout=15)
+        except Exception as e:
+            logger.warning(
+                "could not click Excel Download via dedicated helper (%s); "
+                "trying generic locator", e
+            )
+            self._click("excel_download_button", timeout=10)
         logger.info("clicked: Excel Download")
         self._short_pause(3)
 

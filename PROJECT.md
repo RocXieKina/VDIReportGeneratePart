@@ -181,7 +181,32 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 2. `_read_status` 加 `min_id` 参数，过滤掉旧报告行
 3. `_read_row_status` 只信任 icon：`Report_Success`/`success` → DONE，其他 icon / 无 icon → RUNNING。**去掉所有文本 fallback**，避免吸入邻近元素的状态文本
 
-### 6.7 其他坑
+### 6.7 ⚠️ 已修复的关键 bug：Excel Download 点击无反应
+
+**症状**：右键报告 → Result 后，侧边栏 "Excel Download" 点击没反应，没切换到下载页面。
+
+**根因**：Matrix42 把 onclick 绑在 `<td>` 上（通过 `EmControls.Events.SetOnClickMulti(new Array(td1_id, td2_id), {...})`），不是内部的 `<div class="EmText">`。旧 locator `_ci("excel download")` 优先匹配到 `<div>`，Selenium click 落在 div 上，但 Matrix42 的 handler 可能用 `event.target` 判断，事件没冒泡触发 td 的 handler → LoadContent 导航没执行。
+
+**wass Excel Download HTML 结构**：
+```html
+<td id="cef5e254-..." class="EmText" style="cursor:pointer;">
+  <div class="EmText">Excel Download</div>
+</td>
+<script>
+EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
+  {"OnClick":"javascript:HighlightElement(\u0027Result\u0027, ...);
+   LoadContent(\u0027Level2_Form\u0027, \u0027StatusContentResult\u0027,
+   \u0027Inv_Rep_Status_Download.aspx?id=32811\u0027);"});
+</script>
+```
+
+**修复**（已合入）：新增 `_click_excel_download(timeout)`：
+- 直接定位 `<td>`（带 `EmText` class 且含 "Excel Download" 文本），不点 `<div>`
+- scrollIntoView + normal click，失败回退 JS click
+- 终极 fallback：从页面 `<script>` 里正则提取 `Inv_Rep_Status_Download.aspx?id=NNN` URL，直接 `LoadContent('Level2_Form', 'StatusContentResult', url)` 调用，绕过 Matrix42 事件绑定
+- `download_result` 先试新 helper，失败再退回 `_click("excel_download_button")`
+
+### 6.8 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
@@ -190,7 +215,7 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 - 整个文档可能渲染在 `<iframe>` 里，`_find_clickable` 先在 top document 找，找不到再遍历所有 iframe（一层深）
 - 右键行用 `ActionChains.context_click(row)`，失败回退到 JS dispatch contextmenu 事件
 
-### 6.7 部署注意事项
+### 6.9 部署注意事项
 
 - 必须是能访问 `wass.bmwgroup.net` 的 BMW 内网 Windows 机器
 - 首次跑要手动在浏览器完成 SSO 登录，`ensure_logged_in` 等 `login_timeout`（默认 120s）
