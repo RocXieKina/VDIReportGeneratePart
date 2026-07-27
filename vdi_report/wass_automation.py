@@ -30,6 +30,7 @@ This module can only be exercised on a Windows machine that can reach
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -48,6 +49,25 @@ from selenium.common.exceptions import TimeoutException
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_js_unicode(s: str) -> str:
+    """Decode ``\\uXXXX`` escape sequences in a JS source string.
+
+    ``<script>.textContent`` returns the *raw* source text -- escape sequences
+    like ``\\u0027`` (a single quote) are kept as the 6 literal characters
+    ``\\ u 0 0 2 7`` and are only interpreted when the JS is executed. wass/
+    Matrix42 registers button onclick handlers via
+    ``EmControls.Events.SetOnClick("BtnId", {"OnClick": "ClosePopup(\\u0027Level3\\u0027)"})``
+    so reading the script text yields ``ClosePopup(\\u0027Level3\\u0027)`` --
+    which never substring-matches the literal ``ClosePopup('Level3')`` we look
+    for. Decoding the escapes first makes the match work.
+    """
+    if not s:
+        return s
+    return re.sub(
+        r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s
+    )
 
 
 def _ci(label: str) -> str:
@@ -389,12 +409,17 @@ class WassReportAutomator:
                         "return '';",
                         btn_id,
                     ) or ""
+                    # Decode \uXXXX escapes: Matrix42 stores the onclick as a
+                    # JSON string, so quotes inside it appear as \u0027 in the
+                    # raw script text and would never match a literal target
+                    # like ClosePopup('Level3').
+                    script_norm = _decode_js_unicode(script)
                     visible = btn.is_displayed()
                     last_candidate_info.append(
                         f"id={btn_id} visible={visible} script_has_target="
-                        f"{onclick_contains in script}"
+                        f"{onclick_contains in script_norm}"
                     )
-                    if onclick_contains in script and visible:
+                    if onclick_contains in script_norm and visible:
                         self._scroll_into_view(btn)
                         try:
                             btn.click()
@@ -419,6 +444,42 @@ class WassReportAutomator:
             f"button '{name}' (label='{label}', onclick~'{onclick_contains}') "
             f"not found; candidates: {last_candidate_info or '(none)'}; "
             f"last error: {last_err}"
+        )
+
+    def _click_any_visible_button(
+        self, name: str, label: str, timeout: float = 10
+    ) -> None:
+        """Click the first *visible* Matrix42 Button widget whose label matches.
+
+        Fallback used when :meth:`_click_button_by_onclick` cannot match the
+        onclick handler. At any given wizard step only the relevant button is
+        on screen, so the first visible ``<div id="Button...">`` with the
+        matching ``<span class="ui-button-text">`` text is the right one.
+        """
+        deadline = time.time() + timeout
+        xpath = (
+            f"//div[starts-with(@id,'Button')]"
+            f"[.//span[@class='ui-button-text' and normalize-space()='{label}']]"
+        )
+        while time.time() < deadline:
+            for btn in self._d.find_elements(By.XPATH, xpath):
+                try:
+                    if not btn.is_displayed():
+                        continue
+                    self._scroll_into_view(btn)
+                    try:
+                        btn.click()
+                    except Exception:
+                        self._d.execute_script("arguments[0].click();", btn)
+                    logger.info(
+                        "clicked: %s (any visible '%s' button)", name, label
+                    )
+                    return
+                except Exception:
+                    continue
+            time.sleep(0.5)
+        raise TimeoutException(
+            f"no visible '{label}' button found for '{name}'"
         )
 
     # ------------------------------------------------------------------ #
@@ -731,7 +792,9 @@ class WassReportAutomator:
                 "could not find picker OK via ClosePopup('Level3') (%s); "
                 "trying any visible OK button", e
             )
-            self._click("ok_button", timeout=10)
+            self._click_any_visible_button(
+                "result_elements_ok_button", "OK", timeout=10
+            )
 
     def finish_wizard(self) -> None:
         """Click Step2 Next (-> Step3), then the generate-report OK.
@@ -753,7 +816,9 @@ class WassReportAutomator:
                 "could not find Step2 Next via Inv_Rep_Step3.aspx (%s); "
                 "trying any visible Next button", e
             )
-            self._click("next_button", timeout=10)
+            self._click_any_visible_button(
+                "next_step2_button", "Next", timeout=10
+            )
         self._short_pause(2)
         try:
             self._click_button_by_onclick(
@@ -764,7 +829,9 @@ class WassReportAutomator:
                 "could not find generate OK via Save_Report.aspx (%s); "
                 "trying any visible OK button", e
             )
-            self._click("ok_button", timeout=10)
+            self._click_any_visible_button(
+                "generate_report_ok_button", "OK", timeout=10
+            )
 
     def wait_for_completion(
         self,
