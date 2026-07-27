@@ -609,17 +609,21 @@ class WassReportAutomator:
         self._short_pause(2)
 
         # Tick each requested checkbox by matching the label text inside the
-        # row's <div class='EmText EmTextClick'>. We click the EmCheckbox div
-        # (the real toggle target) rather than the raw <input>, because
-        # Matrix42 wires the onclick on the div, not the input.
+        # row's <div class='EmText EmTextClick'>, then toggling via Matrix42's
+        # own CheckBoxToggle() function using the row's Choice id.
         #
-        # IMPORTANT: the picker popup has its own scrollable content area, and
-        # after expanding Login the Last Logon / Last User / ... rows live
-        # below the fold. We must scroll each row into view *inside the popup*
-        # before clicking, otherwise the click lands on whatever overlaps it.
-        # scrollIntoView({block:'center'}) on the row itself works because the
-        # browser walks up the scroll-container chain (including the popup's
-        # inner div) when bringing the element into view.
+        # Why CheckBoxToggle instead of clicking the EmCheckbox div:
+        #   - The picker popup has its own scrollable content area. After
+        #     expanding Login, the Last Logon / Last User / ... rows live
+        #     below the fold. Even after scrollIntoView, the .click() on the
+        #     EmCheckbox div sometimes does not register for the lower rows
+        #     (the user observed the first two tick but the last two do not).
+        #   - Matrix42 wires the toggle on EmCheckboxClicked(this) which reads
+        #     the div's Choice_NNN id and flips currentstate. Calling
+        #     CheckBoxToggle('Choice_NNN') directly does the same thing
+        #     without depending on a DOM click landing on the right pixel.
+        #   - We still scrollIntoView first so the row is visible (some
+        #     Matrix42 builds refuse to toggle hidden inputs).
         for label in elements:
             try:
                 # Find the label div whose text matches (case-insensitive).
@@ -633,23 +637,44 @@ class WassReportAutomator:
                     ),
                     message=f"label '{label}' not found",
                 )
-                # The EmCheckbox div is in the same <tr>, last <td>.
+                # The EmCheckbox div is in the same <tr>, last <td>. It contains
+                # <input id="Choice_NNN" ...> -- the id is the toggle key.
                 row = label_div.find_element(By.XPATH, "./ancestor::tr[1]")
-                cb_div = row.find_element(By.XPATH, ".//div[contains(@class,'EmCheckbox')]")
-                # Check current state via the input.
-                cb_input = cb_div.find_element(By.XPATH, ".//input[@type='checkbox']")
+                cb_input = row.find_element(
+                    By.XPATH, ".//div[contains(@class,'EmCheckbox')]//input[@type='checkbox']"
+                )
+                choice_id = cb_input.get_attribute("id") or ""
                 # Scroll the row into view inside the popup's scroll area.
-                # block:'center' puts it in the middle of the visible region
-                # so the checkbox is reliably clickable.
                 self._d.execute_script(
                     "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
                     row,
                 )
-                # Small pause to let the scroll settle.
                 time.sleep(0.4)
                 if not cb_input.is_selected():
-                    self._d.execute_script("arguments[0].click();", cb_div)
-                    logger.info("ticked: %s", label)
+                    # Call Matrix42's own toggle function. This is the same
+                    # call the row's onclick handlers make
+                    # (CheckBoxToggle('Choice_NNN'); DisabledCheckAll(...)).
+                    # DisabledCheckAll is cosmetic (greys out a "check all"
+                    # box), so we skip it.
+                    if choice_id:
+                        self._d.execute_script(
+                            "if (typeof CheckBoxToggle === 'function') {"
+                            "  CheckBoxToggle(arguments[0]);"
+                            "} else {"
+                            "  var cb = document.getElementById(arguments[0]);"
+                            "  if (cb) { cb.checked = !cb.checked; "
+                            "    cb.dispatchEvent(new Event('change',{bubbles:true})); }"
+                            "}",
+                            choice_id,
+                        )
+                        logger.info("ticked: %s (via CheckBoxToggle('%s'))", label, choice_id)
+                    else:
+                        # Fallback: click the EmCheckbox div directly.
+                        cb_div = row.find_element(
+                            By.XPATH, ".//div[contains(@class,'EmCheckbox')]"
+                        )
+                        self._d.execute_script("arguments[0].click();", cb_div)
+                        logger.info("ticked: %s (via div click fallback)", label)
                 else:
                     logger.info("already ticked: %s", label)
             except Exception as e:
