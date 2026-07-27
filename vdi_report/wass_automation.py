@@ -34,6 +34,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin, urlparse
 
 from selenium import webdriver
 from selenium.webdriver import ActionChains
@@ -257,6 +258,37 @@ class WassReportAutomator:
         self.driver.maximize_window()
         self.driver.get(config.WASS_URL)
         logger.info("Navigated to %s", config.WASS_URL)
+
+        # Force the download directory via CDP. The prefs set above are
+        # sometimes overridden by enterprise Edge group policies (e.g. BMW's
+        # managed Edge), which would pop a "Save as" dialog and freeze
+        # Selenium. The CDP command Page.setDownloadBehavior is honoured even
+        # under managed policies and pins every download to download_dir.
+        self._set_download_dir_via_cdp()
+
+    def _set_download_dir_via_cdp(self) -> None:
+        """Pin the browser download directory via Chrome DevTools Protocol.
+
+        Works for both Edge and Chrome (both are Chromium-based). Silently
+        no-ops if the driver doesn't expose ``execute_cdp_cmd`` (e.g. older
+        Selenium or a non-Chromium browser).
+        """
+        try:
+            self.driver.execute_cdp_cmd(
+                "Page.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(self.download_dir),
+                },
+            )
+            logger.info(
+                "CDP download behaviour pinned to %s", self.download_dir
+            )
+        except Exception as e:
+            logger.debug(
+                "could not set CDP download behaviour (%s); "
+                "relying on prefs only", e
+            )
 
     def _download_prefs(self) -> Dict[str, Any]:
         return {
@@ -878,7 +910,29 @@ class WassReportAutomator:
                     last_err = e
                     continue
             time.sleep(0.5)
-        # Last-resort: navigate to the href directly to force a download.
+        # Fallback 1: download the xlsx URL directly via requests, using the
+        # Selenium session cookies. This completely bypasses the browser's
+        # download UI (no "Save as" dialog can pop) and writes the file to
+        # exactly self.download_dir. Works even when enterprise Edge group
+        # policy overrides the download prefs.
+        try:
+            for link in self._d.find_elements(
+                By.CSS_SELECTOR, "a.EmTextLink[href*='.xlsx']"
+            ):
+                href = link.get_attribute("href") or ""
+                if not href:
+                    continue
+                saved = self._http_download(href, timeout=60)
+                if saved:
+                    logger.info("downloaded via requests: %s", saved)
+                    return
+                break
+        except Exception as e:
+            last_err = e
+        # Fallback 2: navigate the browser to the href directly. Forces Edge
+        # to download outside Matrix42's event handling -- relies on the CDP
+        # download dir pin from _set_download_dir_via_cdp to land the file in
+        # self.download_dir.
         try:
             for link in self._d.find_elements(
                 By.CSS_SELECTOR, "a.EmTextLink[href*='.xlsx']"
@@ -899,6 +953,105 @@ class WassReportAutomator:
             f"could not trigger download via link within {timeout}s; "
             f"last error: {last_err}"
         )
+
+    def _http_download(self, url: str, timeout: int = 60) -> Optional[Path]:
+        """Stream-download *url* to ``download_dir`` using Selenium's cookies.
+
+        Bypasses the browser download UI entirely (no "Save as" dialog), so
+        the file always lands in ``download_dir``. Uses the Selenium session
+        cookies for authentication. Returns the saved Path, or None on
+        failure.
+
+        wass is intranet and often uses Windows Integrated Auth (NTLM/Kerberos);
+        if plain ``requests`` gets a 401, we fall back to ``HttpNtlmAuth`` if
+        the ``requests_ntlm`` package is available. Otherwise we return None
+        and let the caller try the next strategy.
+        """
+        try:
+            import requests
+        except ImportError:
+            logger.debug("requests not installed; skipping HTTP download")
+            return None
+
+        # Resolve relative URL against current page URL.
+        current_url = self._d.current_url or config.WASS_URL
+        full_url = urljoin(current_url, url)
+
+        # Pull cookies from the Selenium session.
+        cookies = {c["name"]: c["value"] for c in self._d.get_cookies()}
+        # Derive a filename from the URL path, falling back to a timestamp.
+        parsed = urlparse(full_url)
+        name = Path(parsed.path).name or f"report_{int(time.time())}.xlsx"
+        if not name.lower().endswith(".xlsx"):
+            name += ".xlsx"
+        dest = self.download_dir / name
+
+        headers = {
+            # wass checks Referer on some endpoints.
+            "Referer": current_url,
+            "User-Agent": (
+                self._d.execute_script("return navigator.userAgent;")
+                if self._d
+                else "Mozilla/5.0"
+            ),
+        }
+
+        # Try plain requests first.
+        try:
+            logger.info("HTTP download: %s -> %s", full_url, dest)
+            with requests.get(
+                full_url,
+                cookies=cookies,
+                headers=headers,
+                stream=True,
+                timeout=timeout,
+                verify=False,  # intranet self-signed certs are common
+            ) as r:
+                if r.status_code == 401:
+                    raise PermissionError("401 Unauthorized -- try NTLM")
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=64 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            if dest.exists() and dest.stat().st_size > 0:
+                return dest
+        except PermissionError:
+            pass  # fall through to NTLM
+        except Exception as e:
+            logger.debug("plain requests download failed: %s", e)
+
+        # Fallback: NTLM auth (BMW intranet often uses Windows Integrated
+        # Auth). requests_ntlm wraps HttpNtlmAuth and reuses the current
+        # Windows credentials.
+        try:
+            from requests_ntlm import HttpNtlmAuth
+        except ImportError:
+            logger.debug(
+                "requests_ntlm not installed; cannot retry with NTLM auth"
+            )
+            return None
+        try:
+            logger.info("HTTP download (NTLM): %s -> %s", full_url, dest)
+            with requests.get(
+                full_url,
+                cookies=cookies,
+                headers=headers,
+                stream=True,
+                timeout=timeout,
+                verify=False,
+                auth=HttpNtlmAuth("", ""),
+            ) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=64 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            if dest.exists() and dest.stat().st_size > 0:
+                return dest
+        except Exception as e:
+            logger.debug("NTLM download failed: %s", e)
+        return None
 
     # ------------------------------------------------------------------ #
     # High-level wizard steps

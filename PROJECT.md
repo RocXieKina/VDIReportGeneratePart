@@ -221,7 +221,23 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 - **终极 fallback**：`self._d.get(href)` 直接让浏览器导航到 xlsx URL，绕过 Matrix42 事件绑定，强制下载
 - `download_result` 替换原来一次性 `_click("download_link")` 为调用新方法
 
-### 6.9 其他坑
+### 6.9 ⚠️ 已修复的关键 bug：下载文件不在指定位置 / 弹 Save as 对话框
+
+**症状**：用户反馈"下载文件的位置地址一定放在我指定的地方。可以选择 Save as，指定位置"——即 Edge 浏览器下载文件时可能弹出 Save as 对话框，文件不落到 `download_dir`，Selenium 卡住。
+
+**根因**：BMW 企业 Edge 组策略覆盖了 Selenium 在 prefs 里设置的 `download.prompt_for_download: False` / `download.default_directory`，强制弹 Save as 对话框。
+
+**修复**（已合入）三层保障：
+1. **启动时 CDP 强制设置下载目录**：`_set_download_dir_via_cdp()` 调用 `driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": ...})`，CDP 命令受企业策略尊重，能把下载钉死在 `download_dir`
+2. **`_click_download_link` 加 requests + cookies HTTP 下载 fallback**（新增 `_http_download`）：
+   - 从 `<a href="...xlsx">` 提取 URL
+   - 用 Selenium 的 session cookies + Referer + User-Agent 流式下载到 `download_dir`
+   - **完全绕过浏览器下载 UI**，不弹任何对话框，文件 100% 落在指定位置
+   - 401 时 fallback 到 `requests_ntlm.HttpNtlmAuth("", "")`（BMW 内网常用 Windows 集成认证）
+3. **`_click_download_link` 三层策略**：ActionChains 真实点击 + 验证文件 → requests HTTP 下载 → `self._d.get(href)` 浏览器导航（依赖 CDP 钉的下载目录）
+4. `requirements.txt` 加 `requests` + `requests_ntlm`
+
+### 6.10 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
@@ -230,7 +246,7 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 - 整个文档可能渲染在 `<iframe>` 里，`_find_clickable` 先在 top document 找，找不到再遍历所有 iframe（一层深）
 - 右键行用 `ActionChains.context_click(row)`，失败回退到 JS dispatch contextmenu 事件
 
-### 6.10 部署注意事项
+### 6.11 部署注意事项
 
 - 必须是能访问 `wass.bmwgroup.net` 的 BMW 内网 Windows 机器
 - 首次跑要手动在浏览器完成 SSO 登录，`ensure_logged_in` 等 `login_timeout`（默认 120s）
