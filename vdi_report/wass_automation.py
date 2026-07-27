@@ -223,7 +223,14 @@ class WassReportAutomator:
             message=f"locator '{name}' not clickable",
         )
         self._scroll_into_view(el)
-        el.click()
+        try:
+            el.click()
+        except Exception as e:
+            # "element click intercepted" is common on overlay/hover nav menus
+            # (e.g. wass MainNaviBottom). Fall back to a JS click, which bypasses
+            # the overlay-hit-test that the normal WebDriver click performs.
+            logger.debug("normal click failed (%s); retrying via JS", type(e).__name__)
+            self._d.execute_script("arguments[0].click();", el)
         logger.info("clicked: %s", name)
 
     def _scroll_into_view(self, el) -> None:
