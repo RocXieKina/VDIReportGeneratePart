@@ -55,30 +55,59 @@ logger = logging.getLogger(__name__)
 # strings if the real wass UI uses different wording.
 # ---------------------------------------------------------------------------
 DEFAULT_LOCATORS: Dict[str, Any] = {
-    # Top-level navigation
-    "inventory_tab": (By.XPATH, "//*[normalize-space(text())='Inventory']"),
-    "create_report": (By.XPATH, "//*[normalize-space(text())='create report']"),
-    "new_report": (By.XPATH, "//*[normalize-space(text())='New Report']"),
+    # Top-level navigation. All text-based XPaths use translate() so they are
+    # case-insensitive -- wass uses "Create report" (mixed case), not the
+    # lowercase "create report" the user described verbally.
+    "inventory_tab": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='inventory']",
+    ),
+    "create_report": (
+        By.XPATH,
+        "//*[contains(normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'create report')]",
+    ),
+    "new_report": (
+        By.XPATH,
+        "//*[contains(normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'new report')]",
+    ),
     # Report name input -- any visible text input near the top of the wizard.
     "report_name_input": (By.CSS_SELECTOR, "input[type='text']"),
     # Import step
     "import_button": (
         By.XPATH,
-        "//*[normalize-space(text())='Import']",
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='import']",
     ),
     "import_computer_list_link": (
         By.XPATH,
-        "//*[normalize-space(text())='Import computer list']",
+        "//*[contains(normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'import computer list')]",
     ),
     "import_textarea": (By.CSS_SELECTOR, "textarea"),
     # Wizard navigation
-    "ok_button": (By.XPATH, "//*[normalize-space(text())='OK']"),
-    "next_button": (By.XPATH, "//*[normalize-space(text())='Next']"),
+    "ok_button": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='ok']",
+    ),
+    "next_button": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='next']",
+    ),
     "result_elements_button": (
         By.XPATH,
-        "//*[normalize-space(text())='Result elements']",
+        "//*[contains(normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'result element')]",
     ),
-    "login_group": (By.XPATH, "//*[normalize-space(text())='login']"),
+    "login_group": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='login']",
+    ),
     # Status / refresh
     "refresh_button": (
         By.XPATH,
@@ -86,10 +115,15 @@ DEFAULT_LOCATORS: Dict[str, Any] = {
         " | //*[contains(@class,'refresh')]",
     ),
     # Result dialog
-    "result_menu_item": (By.XPATH, "//*[normalize-space(text())='Result']"),
+    "result_menu_item": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='result']",
+    ),
     "excel_download_button": (
         By.XPATH,
-        "//*[normalize-space(text())='Excel Download']",
+        "//*[contains(normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')),'excel download')]",
     ),
     "download_link": (
         By.XPATH,
