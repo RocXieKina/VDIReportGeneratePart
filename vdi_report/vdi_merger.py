@@ -57,6 +57,21 @@ def _select_columns(df: pd.DataFrame, wanted: List[str]) -> pd.DataFrame:
     return df[chosen]
 
 
+def _read_report(path: Path) -> pd.DataFrame:
+    """Read a VDI report file, auto-detecting .csv vs .xlsx.
+
+    VDI VMware exports (Z3/Z4) are produced as ``.csv``; other reports use
+    ``.xlsx``. For CSV we use ``sep=None, engine='python'`` so the separator
+    (``,`` or ``;``) is auto-detected -- BMW is a German company and German
+    Excel often exports CSV with ``;`` as the field separator.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        # utf-8-sig handles both plain UTF-8 and UTF-8-with-BOM.
+        return pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+    return pd.read_excel(path)
+
+
 def merge_vdi_reports(
     z3_path: Optional[Path],
     z4_path: Optional[Path],
@@ -73,7 +88,7 @@ def merge_vdi_reports(
         if path is None:
             continue
         logger.info("Reading VDI %s report: %s", label, path)
-        df = pd.read_excel(path)
+        df = _read_report(path)
         df = _normalize_columns(df)
 
         missing = [

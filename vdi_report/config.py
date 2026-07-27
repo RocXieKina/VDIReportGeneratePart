@@ -52,8 +52,9 @@ AD_KEEP_COLUMNS = ["Account", "DepartmentCode", "Name", "EmailAddress"]
 Z3_PREFIX = "Z3"
 Z4_PREFIX = "Z4"
 
-# Excel extensions we recognise when scanning a folder.
-EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xlsb", ".xls")
+# Spreadsheet/report file extensions we recognise when scanning a folder.
+# Includes .csv because VDI VMware exports (Z3/Z4) are produced as .csv.
+EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv")
 
 # How many days back to look for an AD report if the latest day is empty.
 AD_MAX_LOOKBACK_DAYS = 30
