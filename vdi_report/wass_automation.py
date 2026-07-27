@@ -400,7 +400,11 @@ class WassReportAutomator:
         time.sleep(3)
         logger.info("imported computer list submitted")
 
-        self._click("ok_button")
+        # NOTE: do NOT click OK here. The import dialog has its own OK button
+        # that *closes the whole New Report popup* (verified by the user --
+        # clicking it dropped them back to the report-name page). The correct
+        # flow is: after the import link submits, the wizard stays on the
+        # report-name page and we proceed directly to clicking Next.
 
     def select_result_elements(self, elements: List[str]) -> None:
         self._click("result_elements_button")
