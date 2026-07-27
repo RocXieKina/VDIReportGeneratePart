@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
+import pandas as pd
+
 from .config import AD_MAX_LOOKBACK_DAYS, EXCEL_EXTENSIONS
 
 logger = logging.getLogger(__name__)
@@ -16,10 +18,31 @@ def _is_excel_file(path: Path) -> bool:
 
 
 def list_excel_files(folder: Path) -> List[Path]:
-    """Return sorted Excel files directly inside *folder* (non-recursive)."""
+    """Return sorted spreadsheet files directly inside *folder* (non-recursive).
+
+    Despite the name, this also matches ``.csv`` (see ``EXCEL_EXTENSIONS``),
+    because BMW VDI/AD exports are produced as CSV.
+    """
     if not folder.is_dir():
         return []
     return sorted(p for p in folder.iterdir() if _is_excel_file(p))
+
+
+def read_report(path: Path) -> pd.DataFrame:
+    """Read a tabular report file, auto-detecting ``.csv`` vs ``.xlsx``.
+
+    BMW exports (VDI Z3/Z4, AD Nameanddepartment) are produced as ``.csv``;
+    other reports (Checkout PC List, wass last-login) use ``.xlsx``.
+
+    For CSV we use ``sep=None, engine='python'`` so the separator is
+    auto-detected -- BMW is a German company and German Excel often exports
+    CSV with ``;`` as the field separator. ``utf-8-sig`` handles both plain
+    UTF-8 and UTF-8-with-BOM (Excel CSV export on Windows adds a BOM).
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+    return pd.read_excel(path)
 
 
 def find_latest_vdi_folder(

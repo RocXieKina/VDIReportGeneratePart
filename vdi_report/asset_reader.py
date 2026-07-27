@@ -19,12 +19,14 @@ from .config import (
     ASSET_FILE_PREFIX,
     ASSET_MAX_LOOKBACK_DAYS,
 )
+from .paths import read_report
 
 logger = logging.getLogger(__name__)
 
 
 def _is_excel_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in (".xlsx", ".xlsm", ".xlsb", ".xls")
+    from .config import EXCEL_EXTENSIONS
+    return path.is_file() and path.suffix.lower() in EXCEL_EXTENSIONS
 
 
 def find_latest_asset_folder(
@@ -101,7 +103,7 @@ def load_asset_names(
     wasted on repeated computer names.
     """
     logger.info("Reading asset report: %s", path)
-    df = pd.read_excel(path)
+    df = read_report(path)
     df.columns = [str(c).strip() for c in df.columns]
 
     have_lower = {str(c).lower(): c for c in df.columns}

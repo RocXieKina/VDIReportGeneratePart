@@ -14,6 +14,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .config import AD_EXPECTED_COLUMNS, AD_KEEP_COLUMNS
+from .paths import read_report
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def load_ad_report(
     """
     keep_columns = list(keep_columns or AD_KEEP_COLUMNS)
     logger.info("Reading AD report: %s", path)
-    df = pd.read_excel(path)
+    df = read_report(path)
     df = _normalize_columns(df)
 
     have_lower = {str(c).lower(): c for c in df.columns}

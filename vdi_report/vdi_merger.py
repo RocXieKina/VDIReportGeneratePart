@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 
 from .config import VDI_EXPECTED_COLUMNS, VDI_KEEP_COLUMNS, Z3_PREFIX, Z4_PREFIX
-from .paths import list_excel_files
+from .paths import list_excel_files, read_report
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +57,6 @@ def _select_columns(df: pd.DataFrame, wanted: List[str]) -> pd.DataFrame:
     return df[chosen]
 
 
-def _read_report(path: Path) -> pd.DataFrame:
-    """Read a VDI report file, auto-detecting .csv vs .xlsx.
-
-    VDI VMware exports (Z3/Z4) are produced as ``.csv``; other reports use
-    ``.xlsx``. For CSV we use ``sep=None, engine='python'`` so the separator
-    (``,`` or ``;``) is auto-detected -- BMW is a German company and German
-    Excel often exports CSV with ``;`` as the field separator.
-    """
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        # utf-8-sig handles both plain UTF-8 and UTF-8-with-BOM.
-        return pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
-    return pd.read_excel(path)
-
-
 def merge_vdi_reports(
     z3_path: Optional[Path],
     z4_path: Optional[Path],
@@ -88,7 +73,7 @@ def merge_vdi_reports(
         if path is None:
             continue
         logger.info("Reading VDI %s report: %s", label, path)
-        df = _read_report(path)
+        df = read_report(path)
         df = _normalize_columns(df)
 
         missing = [

@@ -133,7 +133,9 @@ class AssetWassPipeline:
         frames: List[pd.DataFrame] = []
         for p in paths:
             try:
-                df = pd.read_excel(p)
+                # Use shared read_report so .csv downloads are also merged.
+                from .paths import read_report
+                df = read_report(p)
                 frames.append(df)
             except Exception as e:
                 logger.warning("could not read %s for merge: %s", p, e)

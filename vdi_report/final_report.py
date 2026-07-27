@@ -32,6 +32,7 @@ import pandas as pd
 
 from . import config
 from .asset_reader import find_checkout_pc_list_file, find_latest_asset_folder
+from .paths import read_report
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def find_lastlogon_file(folder: Path) -> Optional[Path]:
 def load_vdi_ad_report(path: Path) -> pd.DataFrame:
     """Read ``VDI_AD_final.xlsx`` (output of run.py)."""
     logger.info("Reading VDI+AD report: %s", path)
-    df = pd.read_excel(path)
+    df = read_report(path)
     df = _normalize_columns(df)
     logger.info("VDI+AD report loaded: %d rows, columns=%s", len(df), list(df.columns))
     return df
@@ -110,7 +111,7 @@ def load_lastlogon(path: Path) -> pd.DataFrame:
     and are dropped here.
     """
     logger.info("Reading lastlogon report: %s", path)
-    df = pd.read_excel(path)
+    df = read_report(path)
     df = _normalize_columns(df)
 
     cmap = _column_map(df)
@@ -156,7 +157,7 @@ def load_lastlogon(path: Path) -> pd.DataFrame:
 def load_checkout_responsible(path: Path) -> pd.DataFrame:
     """Read Checkout PC List and keep Name + Responsible columns."""
     logger.info("Reading Checkout PC List (responsible columns): %s", path)
-    df = pd.read_excel(path)
+    df = read_report(path)
     df = _normalize_columns(df)
 
     cmap = _column_map(df)
