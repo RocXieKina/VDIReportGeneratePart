@@ -119,15 +119,27 @@ wass 的按钮不是标准 `<button>`，而是 `<div id="Button<guid>" class="ui
 
 `select_result_elements` 和 `finish_wizard` 的 fallback 已切到新 helper。
 
-### 6.3 其他坑
+### 6.3 ⚠️ 已修复的关键 bug：右键菜单 "Result" 点不到
+
+**症状**：报告跑完后右键行，菜单弹出（Execute/Result/Copy/Edit/Delete，Result 是第 2 项），但 "Result" 没被点到。
+
+**根因**：wass 用 jQuery contextMenu 插件，菜单是 `<ul class="context-menu-list"><li class="context-menu-item"><span>Result</span></li></ul>`。旧 locator `text()='result'` 会匹配页面上**任何**文本是 "Result" 的元素——包括报表列表的 "Result" 列头。列头在 DOM 顺序上排在菜单 `<span>` 前面，所以 `_click` 点到列头，菜单项没触发。
+
+**修复**（已合入）：
+1. `result_menu_item` locator 改为限定到 `ul.context-menu-list` 内的 `li.context-menu-item`
+2. 新增 `_click_context_menu_item(name, label, timeout)`：scope 到 `.context-menu-item`，等 **presence**（不是 clickable——jQuery contextMenu 的 `<li>` 常过不了 Selenium 的 clickable 检查），JS click 触发插件委托 handler
+3. `download_result` 先试新 helper，失败再退回 `_click("result_menu_item")`
+
+### 6.4 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
 - `_dismiss_import_confirmation` blindly 点 OK/Yes/Confirm 之一，Matrix42 消息框 OK 的 onclick 是 `CloseMessageBox()`
 - 勾选 checkbox 用 `CheckBoxToggle('Choice_NNN')` 直接调 Matrix42 自带函数，不靠 DOM click 落点（picker 弹窗里下方 row 的 click 经常不触发）
 - 整个文档可能渲染在 `<iframe>` 里，`_find_clickable` 先在 top document 找，找不到再遍历所有 iframe（一层深）
+- 右键行用 `ActionChains.context_click(row)`，失败回退到 JS dispatch contextmenu 事件
 
-### 6.4 部署注意事项
+### 6.5 部署注意事项
 
 - 必须是能访问 `wass.bmwgroup.net` 的 BMW 内网 Windows 机器
 - 首次跑要手动在浏览器完成 SSO 登录，`ensure_logged_in` 等 `login_timeout`（默认 120s）

@@ -143,12 +143,19 @@ DEFAULT_LOCATORS: Dict[str, Any] = {
     ),
     # Result dialog (right-click report row -> Result -> Excel Download ->
     # "Your file was successfully created. Click here to download the file.").
-    # "Result" is a context-menu item whose text is exactly "Result".
+    # "Result" is a jQuery contextMenu item: the menu is a
+    # <ul class="context-menu-list"> whose items are
+    # <li class="context-menu-item"><span>Result</span></li>. Scope the XPath
+    # to the menu so we don't accidentally match a "Result" column header or
+    # other stray "Result" text elsewhere on the page (those appear earlier in
+    # DOM order and would otherwise be clicked first).
     "result_menu_item": (
         By.XPATH,
-        "//*[normalize-space(translate(text(),"
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='result']"
-        " | //td[div[normalize-space()='Result']]",
+        "//ul[contains(@class,'context-menu')]"
+        "//li[contains(@class,'context-menu-item')]"
+        "[normalize-space()='Result']"
+        " | //li[contains(@class,'context-menu-item')][normalize-space()='Result']"
+        " | //*[contains(@class,'context-menu-item')]//span[normalize-space()='Result']",
     ),
     # "Excel Download" is a <td> whose inner <div class='EmText'> text is
     # exactly "Excel Download".
@@ -480,6 +487,62 @@ class WassReportAutomator:
             time.sleep(0.5)
         raise TimeoutException(
             f"no visible '{label}' button found for '{name}'"
+        )
+
+    def _click_context_menu_item(
+        self, name: str, label: str, timeout: float = 10
+    ) -> None:
+        """Click a jQuery contextMenu item by its visible label.
+
+        wass renders right-click menus with the jQuery contextMenu plugin as
+        ``<ul class="context-menu-list"><li class="context-menu-item"><span>
+        Label</span></li></ul>``. Two snags with the normal :meth:`_click`:
+
+          1. ``EC.element_to_be_clickable`` often times out on these ``<li>``
+             items (the plugin uses CSS that makes Selenium's visibility /
+             enabled check fail even though the item is plainly on screen).
+          2. A bare ``text()='label'`` XPath would also match a same-named
+             column header or other stray text elsewhere on the page, which
+             appears earlier in DOM order and gets clicked instead of the menu
+             item.
+
+        We therefore scope the search to ``.context-menu-item`` elements,
+        wait for *presence* (not clickability), then JS-click the first
+        visible one. JS ``.click()`` reliably fires the plugin's delegated
+        handler on the ``<li>``.
+        """
+        xpath = (
+            "//li[contains(@class,'context-menu-item')]"
+            f"[normalize-space()='{label}']"
+            " | //*[contains(@class,'context-menu-item')]//span"
+            f"[normalize-space()='{label}']"
+        )
+        deadline = time.time() + timeout
+        last_seen: List[str] = []
+        while time.time() < deadline:
+            els = self._d.find_elements(By.XPATH, xpath)
+            last_seen = []
+            for el in els:
+                try:
+                    vis = el.is_displayed()
+                    last_seen.append(
+                        f"<{el.tag_name}> visible={vis} text={el.text!r}"
+                    )
+                    if not vis:
+                        continue
+                    self._scroll_into_view(el)
+                    try:
+                        el.click()
+                    except Exception:
+                        self._d.execute_script("arguments[0].click();", el)
+                    logger.info("clicked: %s (context menu '%s')", name, label)
+                    return
+                except Exception:
+                    continue
+            time.sleep(0.4)
+        raise TimeoutException(
+            f"context menu item '{label}' for '{name}' not found; "
+            f"candidates: {last_seen or '(none)'}"
         )
 
     # ------------------------------------------------------------------ #
@@ -951,9 +1014,18 @@ class WassReportAutomator:
             )
         self._short_pause(1)
 
-        # Click "Result" in the context menu.
-        self._click("result_menu_item", timeout=10)
-        logger.info("clicked: Result (context menu)")
+        # Click "Result" in the context menu. Use the dedicated helper instead
+        # of _click: jQuery contextMenu <li> items often fail Selenium's
+        # element_to_be_clickable check, and a bare text()='Result' XPath would
+        # match a same-named column header elsewhere on the page first.
+        try:
+            self._click_context_menu_item("result_menu_item", "Result", timeout=10)
+        except Exception as e:
+            logger.warning(
+                "could not click 'Result' via context-menu helper (%s); "
+                "trying generic locator", e
+            )
+            self._click("result_menu_item", timeout=10)
         self._short_pause(2)
 
         # Click "Excel Download".
