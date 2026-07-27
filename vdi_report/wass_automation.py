@@ -121,13 +121,33 @@ DEFAULT_LOCATORS: Dict[str, Any] = {
         By.CSS_SELECTOR,
         "img[alt='Update'], img[src*='Table_Refresh.png']",
     ),
-    # Result dialog (right-click Result -> Excel Download).
-    "result_menu_item": (By.XPATH, _ci("result")),
-    "excel_download_button": (By.XPATH, _ci("excel download")),
+    # Result dialog (right-click report row -> Result -> Excel Download ->
+    # "Your file was successfully created. Click here to download the file.").
+    # "Result" is a context-menu item whose text is exactly "Result".
+    "result_menu_item": (
+        By.XPATH,
+        "//*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='result']"
+        " | //td[div[normalize-space()='Result']]",
+    ),
+    # "Excel Download" is a <td> whose inner <div class='EmText'> text is
+    # exactly "Excel Download".
+    "excel_download_button": (
+        By.XPATH,
+        "//td[div[contains(@class,'EmText') and normalize-space()='Excel Download']]"
+        " | //div[normalize-space()='Excel Download']"
+        " | //*[normalize-space(translate(text(),"
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'))='excel download']",
+    ),
+    # The download link is an <a class='EmTextLink'> pointing at a .xlsx file,
+    # with the text "Your file was successfully created. Click here to
+    # download the file."
     "download_link": (
         By.XPATH,
-        "//a[contains(.,'Click here to download')]"
-        " | //*[contains(.,'successfully created')]",
+        "//a[contains(@href,'.xlsx')]"
+        " | //a[contains(.,'Click here to download')]"
+        " | //*[contains(.,'successfully created')]//a"
+        " | //a[contains(.,'successfully created')]",
     ),
 }
 
@@ -632,31 +652,73 @@ class WassReportAutomator:
         """Right-click the entry -> Result -> Excel Download -> download link.
 
         Returns the path of the newly downloaded .xlsx file.
+
+        From the inspected wass HTML:
+          - The report list shows one row per report (name + status). Right-
+            clicking a row opens a context menu.
+          - "Result" is a context-menu item with that exact text.
+          - Clicking Result opens a popup whose body contains an "Excel
+            Download" cell (<td><div class='EmText'>Excel Download</div></td>).
+          - Clicking Excel Download triggers generation of the file and
+            replaces the popup body with a success message containing an
+            <a class='EmTextLink' href='.../*.xlsx'> link.
+          - Clicking that link downloads the .xlsx.
         """
         before = set(self.download_dir.glob("*.xlsx"))
         logger.info("opening Result for '%s'", report_name)
 
-        # Locate the report row and right-click it to open the context menu.
-        row_xpath = f"//*[contains(.,'{report_name}')]"
+        # Locate the report row. Prefer a <tr> or <td> that contains the
+        # report name as its own text (not a giant container like <body>).
+        row_xpaths = [
+            f"//tr[td[contains(.,'{report_name}')]]",
+            f"//td[normalize-space()='{report_name}']",
+            f"//*[contains(.,'{report_name}') and not(*)]",
+            f"//*[contains(.,'{report_name}')]",
+        ]
+        row = None
+        for xp in row_xpaths:
+            try:
+                row = self._wait(5).until(
+                    EC.presence_of_element_located((By.XPATH, xp)),
+                    message=f"report row via {xp[:40]}",
+                )
+                break
+            except Exception:
+                continue
+        if row is None:
+            raise TimeoutException(f"report row '{report_name}' not found")
+
+        # Right-click the row to open the context menu.
         try:
-            row = self._wait(15).until(
-                EC.presence_of_element_located((By.XPATH, row_xpath)),
-                message=f"report row '{report_name}' not found",
-            )
+            self._scroll_into_view(row)
             ActionChains(self._d).context_click(row).perform()
-            self._short_pause()
-            self._click("result_menu_item", timeout=10)
-        except Exception:
-            # Fallback: some UIs expose Result as a direct button/link.
-            logger.warning("context-menu path failed; trying direct Result click")
-            self._click("result_menu_item", timeout=10)
+            logger.info("context-clicked report row")
+        except Exception as e:
+            logger.warning("context_click failed (%s); trying JS", e)
+            self._d.execute_script(
+                "var el = arguments[0];"
+                "var ev = document.createEvent('MouseEvents');"
+                "ev.initMouseEvent('contextmenu', true, true, window,"
+                "1, 0, 0, 0, 0, false, false, false, false, 2, null);"
+                "el.dispatchEvent(ev);",
+                row,
+            )
+        self._short_pause(1)
 
-        self._short_pause()
+        # Click "Result" in the context menu.
+        self._click("result_menu_item", timeout=10)
+        logger.info("clicked: Result (context menu)")
+        self._short_pause(2)
+
+        # Click "Excel Download".
         self._click("excel_download_button", timeout=15)
-        self._short_pause()
+        logger.info("clicked: Excel Download")
+        self._short_pause(3)
 
+        # Click the success-link to download the .xlsx.
         try:
             self._click("download_link", timeout=30)
+            logger.info("clicked: download link")
         except Exception:
             logger.warning("download link not clicked via locator; "
                            "the file may still download via Excel Download")
