@@ -826,6 +826,80 @@ class WassReportAutomator:
             time.sleep(0.3)
         return False
 
+    def _click_download_link(self, timeout: float = 30) -> None:
+        """Click the ``<a class="EmTextLink" href="*.xlsx">`` download link.
+
+        Like the Excel Download entry, this link's onclick handler (registered
+        via EmControls) inspects the event object and may silently reject
+        clicks with ``isTrusted=false``. Selenium's ``element.click()`` and
+        JS ``.click()`` both produce ``isTrusted=false`` clicks, so we use
+        ``ActionChains`` for a real trusted click.
+
+        Strategy:
+          1. Wait for the ``<a>`` to appear (download file generation takes a
+             few seconds after Excel Download is clicked).
+          2. scrollIntoView, then ``ActionChains.move_to_element(a).click()``.
+          3. Verify a new ``.xlsx`` (or ``.crdownload``) appears in
+             ``download_dir`` within a few seconds. If not, retry the click
+             on the same or next matching link.
+          4. Last-resort: navigate the browser to the link's href directly,
+             which forces Edge to download the file outside Matrix42's
+             event handling.
+        """
+        deadline = time.time() + timeout
+        last_err = None
+        tried_hrefs = set()
+        while time.time() < deadline:
+            links = self._d.find_elements(
+                By.CSS_SELECTOR, "a.EmTextLink[href*='.xlsx']"
+            )
+            for link in links:
+                try:
+                    href = link.get_attribute("href") or ""
+                    if href in tried_hrefs:
+                        continue
+                    if not link.is_displayed():
+                        continue
+                    self._scroll_into_view(link)
+                    # Real trusted click via ActionChains.
+                    try:
+                        ActionChains(self._d).move_to_element(link).click().perform()
+                    except Exception:
+                        link.click()
+                    logger.info("clicked: download link (ActionChains) href=%s", href)
+                    tried_hrefs.add(href)
+                    # Verify a .xlsx or .crdownload appears in download_dir.
+                    if self._wait_for_new_xlsx(set(), timeout=8):
+                        return
+                    logger.debug(
+                        "download link click did not start a download; retrying"
+                    )
+                except Exception as e:
+                    last_err = e
+                    continue
+            time.sleep(0.5)
+        # Last-resort: navigate to the href directly to force a download.
+        try:
+            for link in self._d.find_elements(
+                By.CSS_SELECTOR, "a.EmTextLink[href*='.xlsx']"
+            ):
+                href = link.get_attribute("href") or ""
+                if not href:
+                    continue
+                logger.info(
+                    "download link: navigating browser to href directly: %s", href
+                )
+                self._d.get(href)
+                if self._wait_for_new_xlsx(set(), timeout=15):
+                    return
+                break
+        except Exception as e:
+            last_err = e
+        raise TimeoutException(
+            f"could not trigger download via link within {timeout}s; "
+            f"last error: {last_err}"
+        )
+
     # ------------------------------------------------------------------ #
     # High-level wizard steps
     # ------------------------------------------------------------------ #
@@ -1434,13 +1508,18 @@ class WassReportAutomator:
         logger.info("clicked: Excel Download")
         self._short_pause(3)
 
-        # Click the success-link to download the .xlsx.
+        # Click the success-link to download the .xlsx. Like the Excel Download
+        # entry, Matrix42's <a class="EmTextLink"> may inspect isTrusted and
+        # silently reject JS-triggered clicks -- a real ActionChains click is
+        # required for the browser to actually start the download.
         try:
-            self._click("download_link", timeout=30)
+            self._click_download_link(timeout=30)
             logger.info("clicked: download link")
-        except Exception:
-            logger.warning("download link not clicked via locator; "
-                           "the file may still download via Excel Download")
+        except Exception as e:
+            logger.warning(
+                "download link click failed (%s); "
+                "the file may still download via Excel Download", e
+            )
 
         downloaded = self._wait_for_new_xlsx(before)
         if downloaded:

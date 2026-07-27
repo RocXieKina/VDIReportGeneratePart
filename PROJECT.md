@@ -208,7 +208,20 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 - 终极 fallback：从页面 `<script>` 正则提取完整 `OnClick` handler 字符串，`_decode_js_unicode` 解码 `\uXXXX`，strip `javascript:` 前缀，`eval` 执行整个 handler（含 `HighlightElement` + `LoadContent`），绕过 Matrix42 事件绑定
 - `download_result` 先试新 helper，失败再退回 `_click("excel_download_button")`
 
-### 6.8 其他坑
+### 6.8 ⚠️ 已修复的关键 bug：download link 点击不触发下载
+
+**症状**：Excel Download 已成功跳转，右侧 "Download result file" 链接（`<a class="EmTextLink" href="...xlsx">`）已展示，但点击后没真正下载文件。
+
+**根因**：和 Excel Download 同样的 `isTrusted` 问题——Matrix42 的 `EmTextLink` onclick handler 可能检查 `event.isTrusted`，Selenium `element.click()` / JS `.click()` 产生 `isTrusted=false` 的 click，handler 拒绝执行，浏览器不开始下载。
+
+**修复**（已合入）：新增 `_click_download_link(timeout)`：
+- 找 `a.EmTextLink[href*='.xlsx']`，`scrollIntoView` + `ActionChains.move_to_element(link).click()` 真实点击（`isTrusted=true`）
+- **点击后验证文件是否真的开始下载**：检查 `download_dir` 里 8s 内是否出现新 `.xlsx` 或 `.crdownload`
+- 没下载就换下一个 link 重试（已试过的 href 用 `tried_hrefs` 跳过）
+- **终极 fallback**：`self._d.get(href)` 直接让浏览器导航到 xlsx URL，绕过 Matrix42 事件绑定，强制下载
+- `download_result` 替换原来一次性 `_click("download_link")` 为调用新方法
+
+### 6.9 其他坑
 
 - `import_computer_list` 用 JS 写 textarea value + dispatch input/change 事件，**不能** `send_keys`（4999 行会逐字符发送，Edge 会卡死）
 - `import_computer_list` 末尾**不**点 OK——那个 OK 会关掉整个 New Report 弹窗，让用户回到报告名页。正确流程是提交 import link 后直接点 Step1 Next
@@ -217,7 +230,7 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 - 整个文档可能渲染在 `<iframe>` 里，`_find_clickable` 先在 top document 找，找不到再遍历所有 iframe（一层深）
 - 右键行用 `ActionChains.context_click(row)`，失败回退到 JS dispatch contextmenu 事件
 
-### 6.9 部署注意事项
+### 6.10 部署注意事项
 
 - 必须是能访问 `wass.bmwgroup.net` 的 BMW 内网 Windows 机器
 - 首次跑要手动在浏览器完成 SSO 登录，`ensure_logged_in` 等 `login_timeout`（默认 120s）
