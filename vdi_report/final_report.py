@@ -15,10 +15,11 @@ Joins three data sources on top of the VDI+AD master report produced by
 
 UNION semantics (default): every VDI row is preserved as exactly one row in
 the output. If a VDI user matches multiple laptops, the laptop-derived
-columns are concatenated into a single cell using ``MULTI_LAPTOP_SEPARATOR``
-(";" by default, e.g. "host1; host2; host3"). VDI users without any laptop
-match are kept with empty laptop columns. The VDI data is the unique primary
-key -- the report never fans out to multiple rows per VDI entry.
+columns are expanded horizontally into one slot per laptop (HOSTNAME_1,
+Responsible Name_1, HOSTNAME_2, Responsible Name_2, ...). VDI users
+without any laptop match are kept with empty laptop columns. The VDI data
+is the unique primary key -- the report never fans out to multiple rows
+per VDI entry.
 
 lastlogon rows whose ``LOGIN - LAST USER (ACCOUNT)`` is empty are dropped
 before the join (the user said empty ones don't matter).
@@ -306,58 +307,91 @@ def join_with_checkout(
 
 
 # --------------------------------------------------------------------------- #
-# aggregation: collapse multiple laptops per VDI user into one row
+# pivot: expand multiple laptops per VDI user into horizontal columns
 # --------------------------------------------------------------------------- #
-def _join_nonnull(series: pd.Series) -> str:
-    """Join non-null, non-empty values with MULTI_LAPTOP_SEPARATOR."""
-    vals = series.dropna()
-    vals = vals[vals.astype(str).str.strip() != ""]
-    vals = vals[~vals.astype(str).str.lower().isin(["nan", "none", "nat"])]
-    if vals.empty:
-        return ""
-    return config.MULTI_LAPTOP_SEPARATOR.join(vals.astype(str))
+def pivot_laptops_horizontal(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse multiple laptop rows per VDI entry into a single wide row.
 
+    Instead of concatenating laptop fields with a separator, this expands
+    them horizontally: each laptop gets its own set of columns suffixed
+    with ``_1``, ``_2``, ... The number of slots equals the maximum number
+    of laptops any single VDI user matched. VDI users with fewer laptops
+    get empty cells in the higher-numbered slots.
 
-def aggregate_by_vdi_row(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse multiple laptop rows per VDI entry into a single row.
+    Example: a VDI user with 2 laptops (NB-1 responsible Alice, NB-2
+    responsible Bob) becomes a single row with::
 
-    Groups by ``__row_id__`` (assigned in ``join_vdi_with_lastlogon``) and
-    concatenates laptop-derived columns with ``MULTI_LAPTOP_SEPARATOR``.
-    VDI/AD columns are taken from the first row of each group (they are
-    identical across laptop matches for the same VDI entry).
+        Id | Assigned Users | HOSTNAME_1 | Responsible Name_1 | HOSTNAME_2 | Responsible Name_2
+        V1 | alice         | NB-1       | Alice Wang         | NB-2       | Bob Li
     """
     if "__row_id__" not in df.columns:
-        logger.warning("__row_id__ column missing; skipping aggregation")
+        logger.warning("__row_id__ column missing; skipping pivot")
         return df
 
     cmap = _column_map(df)
-    laptop_cols = [
-        c for c in config.FINAL_REPORT_COLUMNS
-        if c.lower() in cmap and c.lower() not in {
-            "id", "ipv4 address", "assigned users",
-            "departmentcode", "name", "emailaddress",
-        }
-    ]
 
-    agg_map: dict = {}
-    for col in config.FINAL_REPORT_COLUMNS:
-        actual = cmap.get(col.lower())
-        if actual is None:
-            continue
-        if col in laptop_cols:
-            agg_map[actual] = _join_nonnull
-        else:
-            agg_map[actual] = "first"
+    # Map each expected column name to its actual (case-insensitive) name.
+    fixed_actual = {
+        name: cmap.get(name.lower())
+        for name in config.VDI_FIXED_COLUMNS
+        if cmap.get(name.lower()) is not None
+    }
+    laptop_actual = {
+        name: cmap.get(name.lower())
+        for name in config.LAPTOP_COLUMN_TEMPLATE
+        if cmap.get(name.lower()) is not None
+    }
 
-    before = len(df)
-    result = df.groupby("__row_id__", as_index=False, dropna=False).agg(agg_map)
-    result = result.drop(columns=["__row_id__"])
+    # Rank laptops within each VDI row (1-indexed). Rows with NaN HOSTNAME
+    # (VDI users without any laptop match) get slot 1 but their laptop
+    # columns are empty, so they occupy slot 1 with empty values.
+    hostname_col = cmap.get("hostname")
+    if hostname_col is not None:
+        has_laptop = df[hostname_col].notna() & (df[hostname_col].astype(str).str.strip() != "")
+    else:
+        has_laptop = pd.Series([False] * len(df))
+
+    df = df.copy()
+    # Compute slot only among rows that actually have a laptop. Use a
+    # separate dataframe so NaN __row_id__ doesn't corrupt the groupby.
+    laptop_mask = has_laptop.fillna(False)
+    if laptop_mask.any():
+        slot_series = df.loc[laptop_mask].groupby("__row_id__").cumcount() + 1
+        df["__slot__"] = slot_series
+        df["__slot__"] = df["__slot__"].fillna(1).astype(int)
+    else:
+        df["__slot__"] = 1
+
+    max_slots = int(df["__slot__"].max()) if not df.empty else 0
+    if max_slots < 1:
+        max_slots = 1
     logger.info(
-        "Aggregated %d laptop rows -> %d VDI rows (separator='%s')",
-        before,
-        len(result),
-        config.MULTI_LAPTOP_SEPARATOR,
+        "Pivoting %d rows -> %d VDI rows, max %d laptop(s) per user",
+        len(df),
+        df["__row_id__"].nunique(),
+        max_slots,
     )
+
+    # Build the wide dataframe by iterating slots. For each slot, filter
+    # rows where __slot__ == i, take the laptop columns, rename them with
+    # _i suffix, and merge back onto the VDI-fixed columns (taken from
+    # the first row of each __row_id__).
+    base = df.groupby("__row_id__", as_index=False, dropna=False).agg(
+        {actual: "first" for actual in fixed_actual.values()}
+    )
+
+    slot_frames = []
+    for i in range(1, max_slots + 1):
+        sub = df[df["__slot__"] == i][["__row_id__"] + list(laptop_actual.values())].copy()
+        rename_map = {actual: f"{name}_{i}" for name, actual in laptop_actual.items()}
+        sub = sub.rename(columns=rename_map)
+        slot_frames.append(sub)
+
+    result = base
+    for sub in slot_frames:
+        result = result.merge(sub, on="__row_id__", how="left")
+
+    result = result.drop(columns=["__row_id__"])
     return result
 
 
@@ -466,8 +500,9 @@ class FinalReportBuilder:
         else:
             logger.warning("Checkout PC List not found; Responsible columns will be empty")
 
-        # 5. Aggregate: collapse multiple laptops per VDI row into one row
-        merged = aggregate_by_vdi_row(merged)
+        # 5. Pivot: expand multiple laptops per VDI row into horizontal
+        #    columns (HOSTNAME_1, Responsible Name_1, HOSTNAME_2, ...).
+        merged = pivot_laptops_horizontal(merged)
 
         # 6. order columns + write with timestamped filename
         final_df = self._order_columns(merged)
@@ -475,7 +510,8 @@ class FinalReportBuilder:
         final_name = f"{config.FINAL_REPORT_BASENAME}_{timestamp}.xlsx"
         final_out = self.output_dir / final_name
         final_df.to_excel(final_out, index=False)
-        logger.info("Final report written: %s (%d rows)", final_out, len(final_df))
+        logger.info("Final report written: %s (%d rows, %d cols)",
+                    final_out, len(final_df), len(final_df.columns))
         logger.info("=== Final report builder finished ===")
         return final_df
 
@@ -544,20 +580,46 @@ class FinalReportBuilder:
 
     # ------------------------------------------------------------------ #
     def _order_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Reorder to FINAL_REPORT_COLUMNS; drop helper/extra columns.
+        """Reorder to the dynamic column layout.
 
-        Columns that are missing (e.g. asset columns when Checkout PC List was
-        not found) are added as empty columns so the report always has the
-        same shape.
+        The layout is ``VDI_FIXED_COLUMNS`` followed by one slot per laptop
+        (``LAPTOP_COLUMN_TEMPLATE`` with ``_N`` suffix). The number of slots
+        is inferred from the dataframe's existing columns (e.g. if
+        ``HOSTNAME_2`` exists, there are at least 2 slots).
+
+        Missing columns are added as empty columns so every VDI row has the
+        same shape (e.g. a VDI user with 1 laptop gets empty ``_2``,
+        ``_3``, ... columns if another user has 3 laptops).
         """
         cmap = _column_map(df)
+
+        # Detect how many laptop slots exist in the dataframe. Columns
+        # are named "<base>_<N>" (e.g. "HOSTNAME_1", "Responsible Name_2").
+        # We look for any column ending in "_<digit>" and take the max N.
+        max_slots = 0
+        for col in df.columns:
+            s = str(col)
+            # Strip the trailing _<digits>
+            if "_" in s:
+                last_underscore = s.rfind("_")
+                suffix = s[last_underscore + 1:]
+                if suffix.isdigit():
+                    max_slots = max(max_slots, int(suffix))
+        if max_slots < 1:
+            # No laptop columns at all (e.g. Checkout PC List missing).
+            # Still emit one slot so the report shape is stable.
+            max_slots = 1
+
+        target_cols = config.generate_final_columns(max_slots)
         ordered: List[pd.Series] = []
-        for name in config.FINAL_REPORT_COLUMNS:
+        for name in target_cols:
             actual = cmap.get(name.lower())
             if actual is not None:
                 ordered.append(df[actual])
             else:
                 ordered.append(pd.Series([pd.NA] * len(df), name=name))
         result = pd.concat(ordered, axis=1)
-        result.columns = config.FINAL_REPORT_COLUMNS
+        result.columns = target_cols
+        logger.info("Final report column layout: %d slots (%d total columns)",
+                    max_slots, len(target_cols))
         return result

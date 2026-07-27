@@ -147,12 +147,6 @@ FINAL_REPORT_ROOT = (
     r"\VDI auto report\Status gengerate report"
 )
 
-# Separator used when a single VDI user matches multiple laptops. All
-# laptop-derived fields are joined with this separator in a single cell, so
-# the report stays one-row-per-VDI-user (no fan-out). Dashboard code can
-# split on this separator to recover individual laptop rows.
-MULTI_LAPTOP_SEPARATOR = "; "
-
 # --- lastlogon report (downloaded by run_asset.py from wass) ---
 # The file lands in the asset YYYY-MM-DD folder alongside the Checkout PC List.
 # Name pattern: "VDI-laptop-lastlogin-YYYY-MM-DD*.xlsx" (chunk 0),
@@ -196,26 +190,51 @@ ASSET_RESPONSIBLE_COLUMNS = [
 ]
 
 # --- Final report column order ---
-# Defines the exact column order of VDI_Laptop_Asset_final.xlsx.
-FINAL_REPORT_COLUMNS = [
-    # VDI side
+# The report is laid out as:
+#   [VDI/AD fixed columns] + [laptop-1 columns] + [laptop-2 columns] + ...
+# Each laptop "slot" repeats the same set of columns with a "_N" suffix
+# (e.g. "HOSTNAME_1", "Responsible Name_1", "HOSTNAME_2", ...). The number
+# of slots equals the maximum number of laptops any single VDI user has.
+
+# Columns that appear once per VDI row (from VDI + AD sources).
+VDI_FIXED_COLUMNS = [
     "Id",
     "IPv4 Address",
     "Assigned Users",
-    # AD side
     "DepartmentCode",
     "Name",
     "EmailAddress",
-    # lastlogon side
+]
+
+# Columns that repeat once per matched laptop (from lastlogon + Checkout).
+# These are laid out in this exact order within each slot.
+LAPTOP_COLUMN_TEMPLATE = [
     "HOSTNAME",
     "MACHINEID",
     "LOGIN - LAST LOGON",
     "LOGIN - LAST USER",
     "LOGIN - LAST USER (EMAIL)",
-    # asset side
     "Responsible Q Number",
     "Responsible Name",
     "Responsible Company",
     "Responsible Department",
     "Responsible Email",
 ]
+
+# Set of all column names that are laptop-derived (used internally to know
+# which columns aggregate vs. which take "first" when grouping by VDI row).
+LAPTOP_DERIVED_COLUMNS = set(LAPTOP_COLUMN_TEMPLATE)
+
+
+def generate_final_columns(num_laptops: int) -> list:
+    """Build the full column list for the final report.
+
+    ``num_laptops`` is the maximum number of laptops matched by any single
+    VDI user. Each laptop slot appends the LAPTOP_COLUMN_TEMPLATE columns
+    with a "_N" suffix (1-indexed).
+    """
+    cols = list(VDI_FIXED_COLUMNS)
+    for i in range(1, num_laptops + 1):
+        for c in LAPTOP_COLUMN_TEMPLATE:
+            cols.append(f"{c}_{i}")
+    return cols
