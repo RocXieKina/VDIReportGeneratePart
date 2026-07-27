@@ -699,81 +699,132 @@ class WassReportAutomator:
         onclick to **both ``<td>`` cells** via
         ``EmControls.Events.SetOnClickMulti(new Array(td1_id, td2_id), {...})``.
 
-        Two snags with the normal click:
-          1. ``_click`` uses ``EC.element_to_be_clickable`` on whatever the
-             locator returns; if it returns the inner ``<div class="EmText">``
-             the click lands on the div, but Matrix42's handler is registered
-             on the ``<td>`` and may check ``event.target`` -- the click never
-             fires the LoadContent navigation.
-          2. The handler is in a ``SetOnClickMulti`` JSON string with
-             ``\\u0027`` escapes (single quotes), so any onclick-text match
-             needs :func:`_decode_js_unicode` first.
+        Why a plain ``td.click()`` or ``arguments[0].click()`` is NOT enough:
+        Matrix42's handler inspects the event object, and Selenium's
+        ``element.click()`` / JS ``.click()`` produces a click event with
+        ``isTrusted=false`` (or doesn't fire the mousedown/mouseup sequence
+        Matrix42 listens for). The handler silently refuses, the right-side
+        "Download result file" panel never appears, and the next step
+        (download_link) times out. Only a **real** ActionChains click
+        (isTrusted=true) triggers it.
 
-        We locate the ``<td>`` that contains the "Excel Download" label,
-        scroll it into view, and JS-click it. JS ``.click()`` on the ``<td>``
-        reliably triggers Matrix42's delegated handler. If that doesn't fire
-        the navigation, we fall back to calling the LoadContent URL directly
-        via execute_script -- the URL (``Inv_Rep_Status_Download.aspx?id=...``)
-        is parsed out of the script with ``_decode_js_unicode`` applied first.
+        Strategy:
+          1. Locate the ``<td>`` containing the "Excel Download" label.
+          2. Use ``ActionChains.move_to_element(td).click()`` for a real
+             trusted click. Try both the label <td> and the icon <td>.
+          3. Verify the right-side panel actually appeared (look for a
+             ``.xlsx`` href or "Download result file" text). If yes, done.
+          4. If the trusted click didn't fire the handler either, parse the
+             full OnClick string out of the page's ``<script>`` tags
+             (applying :func:`_decode_js_unicode` first), strip the
+             ``javascript:`` prefix, and ``eval`` it directly via
+             execute_script -- this bypasses Matrix42's event binding
+             entirely and runs HighlightElement + LoadContent in order.
+          5. Verify again.
         """
         deadline = time.time() + timeout
         last_err = None
         while time.time() < deadline:
-            # The <td> that contains the Excel Download label <div>.
-            tds = self._d.find_elements(
+            # The <td> cells: one holds the icon (<img id="Icon_Result">),
+            # the other holds the "Excel Download" label <div>. Try both.
+            label_tds = self._d.find_elements(
                 By.XPATH,
                 "//td[contains(@class,'EmText')]"
                 "[.//div[contains(@class,'EmText')]"
-                "[normalize-space()='Excel Download']]"
-                " | //td[normalize-space()='Excel Download']",
+                "[normalize-space()='Excel Download']]",
             )
-            for td in tds:
+            icon_tds = self._d.find_elements(
+                By.XPATH,
+                "//td[contains(@class,'EmText')]"
+                "[.//img[@id='Icon_Result']]",
+            )
+            for td in list(label_tds) + list(icon_tds):
                 try:
                     if not td.is_displayed():
                         continue
                     self._scroll_into_view(td)
-                    # Try normal click first.
+                    # Real trusted click via ActionChains.
                     try:
-                        td.click()
+                        ActionChains(self._d).move_to_element(td).click().perform()
                     except Exception:
-                        self._d.execute_script("arguments[0].click();", td)
-                    logger.info("clicked: excel_download (td click)")
-                    return
+                        # Fall back to direct click if ActionChains fails.
+                        td.click()
+                    logger.info("clicked: excel_download (ActionChains td click)")
+                    # Verify the right-side panel appeared.
+                    if self._wait_for_download_panel(timeout=4):
+                        return
+                    logger.debug(
+                        "td click did not reveal download panel; trying next cell"
+                    )
                 except Exception as e:
                     last_err = e
                     continue
             time.sleep(0.5)
-        # Last-resort: parse the LoadContent URL out of the page's <script>
-        # tags and navigate to it directly. This bypasses Matrix42's event
-        # binding entirely.
+        # Last-resort: eval the full OnClick handler string directly.
         try:
-            url = self._d.execute_script(
+            handler = self._d.execute_script(
                 "var scripts = document.getElementsByTagName('script');"
                 "for (var i = 0; i < scripts.length; i++) {"
                 "  var t = scripts[i].textContent || '';"
-                "  var m = t.match(/Inv_Rep_Status_Download\\.aspx\\?id=\\d+/);"
-                "  if (m) return m[0];"
+                "  if (t.indexOf('Inv_Rep_Status_Download') < 0) continue;"
+                "  var m = t.match(/\"OnClick\"\\s*:\\s*\"([^\"]+)\"/);"
+                "  if (m) return m[1];"
                 "}"
                 "return '';"
             )
-            if url:
+            if handler:
+                # Decode \uXXXX escapes (e.g. \u0027 -> ').
+                handler = _decode_js_unicode(handler)
+                # Strip optional "javascript:" prefix.
+                if handler.lower().startswith("javascript:"):
+                    handler = handler[len("javascript:"):]
                 logger.info(
-                    "excel_download: invoking LoadContent directly for %s", url
+                    "excel_download: eval'ing handler directly: %s", handler
                 )
-                self._d.execute_script(
-                    "if (typeof LoadContent === 'function') {"
-                    "  LoadContent('Level2_Form', 'StatusContentResult',"
-                    "  arguments[0]);"
-                    "}",
-                    url,
-                )
-                return
+                self._d.execute_script("try { eval(arguments[0]); } catch(e) {}", handler)
+                if self._wait_for_download_panel(timeout=5):
+                    return
         except Exception as e:
             last_err = e
         raise TimeoutException(
             f"could not click Excel Download within {timeout}s; "
             f"last error: {last_err}"
         )
+
+    def _wait_for_download_panel(self, timeout: float = 5) -> bool:
+        """Return True if the right-side download panel appeared.
+
+        After a successful Excel Download click, wass loads
+        ``Inv_Rep_Status_Download.aspx`` into the right pane, which shows
+        either a progress message ("file is being created") or the final
+        ``<a class="EmTextLink" href="...xlsx">`` download link. We treat the
+        presence of either as success.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # The download link itself.
+            links = self._d.find_elements(
+                By.CSS_SELECTOR, "a.EmTextLink[href*='.xlsx']"
+            )
+            for link in links:
+                try:
+                    if link.is_displayed():
+                        return True
+                except Exception:
+                    continue
+            # Or any text indicating the download panel loaded.
+            body_text = self._d.execute_script(
+                "return (document.body.innerText || '').toLowerCase();"
+            )
+            if body_text and (
+                "download result file" in body_text
+                or "file was successfully created" in body_text
+                or "file is being created" in body_text
+                or "click here to download" in body_text
+            ):
+                return True
+            time.sleep(0.3)
+        return False
 
     # ------------------------------------------------------------------ #
     # High-level wizard steps

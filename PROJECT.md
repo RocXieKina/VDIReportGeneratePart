@@ -202,8 +202,10 @@ EmControls.Events.SetOnClickMulti(new Array("td1_id", "td2_id"),
 
 **修复**（已合入）：新增 `_click_excel_download(timeout)`：
 - 直接定位 `<td>`（带 `EmText` class 且含 "Excel Download" 文本），不点 `<div>`
-- scrollIntoView + normal click，失败回退 JS click
-- 终极 fallback：从页面 `<script>` 里正则提取 `Inv_Rep_Status_Download.aspx?id=NNN` URL，直接 `LoadContent('Level2_Form', 'StatusContentResult', url)` 调用，绕过 Matrix42 事件绑定
+- **用 `ActionChains.move_to_element(td).click()` 真实点击**（`isTrusted=true`）—— 旧版用 `td.click()` / JS `.click()` 产生 `isTrusted=false` 的 click 事件，Matrix42 handler 拒绝执行，右侧 "Download result file" 面板不出现
+- 尝试 label td 和 icon td 两个 cell（`#Icon_Result` 父 td）
+- **点击后验证右侧面板是否真的出现**（找 `.xlsx` 链接或 "Download result file" / "file was successfully created" / "file is being created" 文本），没出现就换下一个 cell
+- 终极 fallback：从页面 `<script>` 正则提取完整 `OnClick` handler 字符串，`_decode_js_unicode` 解码 `\uXXXX`，strip `javascript:` 前缀，`eval` 执行整个 handler（含 `HighlightElement` + `LoadContent`），绕过 Matrix42 事件绑定
 - `download_result` 先试新 helper，失败再退回 `_click("excel_download_button")`
 
 ### 6.8 其他坑
